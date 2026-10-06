@@ -269,6 +269,10 @@ def harvest(terms: tuple[str, ...] = DEFAULT_TERMS, per_term: int = 200,
                     progress(f"  本轮已下载 {downloaded}/{max_fetch} …")
         rec.file = path.name
         rec.lines = len(path.read_text(encoding="utf-8").splitlines())
+        # 能落盘的一定是开源脚本（闭源脚本 pine-facade 不返回 source）；
+        # 旧文件复用时拿不到 access，补一个默认值，否则列表按 access 过滤会漏掉它们
+        if not rec.access:
+            rec.access = "open_no_auth"
         got.append(rec)
 
     st["downloaded"] = downloaded
