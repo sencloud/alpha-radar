@@ -26,17 +26,20 @@ class Strategy:
     license: str = ""                    # 原脚本许可
     notes: str = ""
     defaults: dict = field(default_factory=dict)   # 覆盖引擎默认参数
+    freqs: tuple = ()                    # 适用周期白名单（空 = 不限）。
+                                         # 日内形态配日线数据必然 0 笔，
+                                         # scheduler.build_cells 会跳过这类组合
 
 
 REGISTRY: dict[str, Strategy] = {}
 
 
 def register(key: str, name: str, source: str = "", license: str = "",
-             notes: str = "", defaults: dict | None = None):
+             notes: str = "", defaults: dict | None = None, freqs: tuple = ()):
     def deco(fn):
         REGISTRY[key] = Strategy(key=key, name=name, fn=fn, source=source,
                                  license=license, notes=notes,
-                                 defaults=dict(defaults or {}))
+                                 defaults=dict(defaults or {}), freqs=tuple(freqs))
         return fn
     return deco
 

@@ -63,22 +63,40 @@ def load_universe(path: Path | None = None) -> dict:
 
 
 def build_cells(cfg: dict) -> list[dict]:
-    """展开成待跑清单：每个元素是 (品种, 市场, 周期, 策略)。"""
+    """展开成待跑清单：每个元素是 (品种, 市场, 周期, 策略)。
+
+    跳过「策略不支持的周期」—— 日内形态（开盘区间突破、冰点反转）配日线必然
+    0 笔，跑它只会浪费配额、把无效行混进榜单。
+    """
+    from .strategies import get as get_strategy
     cells = []
     for market in ("futures", "stocks"):
         block = cfg.get(market) or {}
         for sym in block.get("symbols", []):
             for freq in block.get("freqs", ["1d"]):
                 for strat in cfg.get("strategies", []):
+                    try:
+                        allow = get_strategy(strat).freqs
+                    except KeyError:
+                        allow = ()
+                    if allow and freq not in allow:
+                        continue
                     cells.append({"symbol": sym, "market": market,
                                   "freq": freq, "strategy": strat})
     return cells
 
 
-def _stale(cells: list[dict], max_age_days: int, force: bool) -> list[dict]:
-    """按上次成功时间从旧到新排序；新鲜的成功记录跳过。"""
+def _stale(cells: list[dict], max_age_days: int, force: bool,
+           max_fails: int = 5) -> list[dict]:
+    """排序待跑清单。
+
+    - 新鲜（max_age_days 内成功过）的放最后，不参与本轮；
+    - 失败记录**不算新鲜**：时间戳再新也要重跑（否则一次网络抖动会让某个组合
+      永远不再被尝试 —— 这是踩过的坑）；
+    - 连续失败超过 max_fails 的组合跳过，避免坏品种每轮空跑消耗配额。
+    """
     now = datetime.now()
-    fresh, stale = [], []
+    fresh, stale, dead = [], [], []
     for c in cells:
         last = store.last_ok(c["symbol"], c["strategy"], c["freq"])
         age = None
@@ -87,14 +105,23 @@ def _stale(cells: list[dict], max_age_days: int, force: bool) -> list[dict]:
                 age = (now - datetime.fromisoformat(last["ts"])).days
             except ValueError:
                 age = None
-        c["_age"] = 10 ** 6 if age is None else age
+        ok = bool(last and last.get("status") == "ok")
+        # 没跑过或上次失败 -> 视为最旧，优先跑
+        c["_age"] = (10 ** 6) if (age is None or not ok) else age
         c["_last"] = (last or {}).get("ts", "—")
-        if not force and last and last.get("status") == "ok" \
-                and age is not None and age < max_age_days:
+        c["_fails"] = store.consecutive_failures(c["symbol"], c["strategy"], c["freq"])
+        if not force and c["_fails"] >= max_fails:
+            c["_why"] = f"连续失败 {c['_fails']} 次"
+            dead.append(c)
+        elif not force and ok and age is not None and age < max_age_days:
             fresh.append(c)
         else:
             stale.append(c)
     stale.sort(key=lambda x: -x["_age"])            # 越旧越先跑
+    if dead:
+        out = ", ".join(f"{d['symbol']}/{d['strategy']}/{d['freq']}" for d in dead[:5])
+        print(f"[skip] 连续失败已停跑 {len(dead)} 个组合：{out}"
+              f"{' …' if len(dead) > 5 else ''}（--force 可强制重跑）")
     return stale + fresh
 
 
@@ -161,9 +188,11 @@ def _cycle_inner(cfg, force, limit, only_symbol, only_strategy, client, out,
             cells = [c for c in cells if c["symbol"] == only_symbol]
         if only_strategy:
             cells = [c for c in cells if c["strategy"] == only_strategy]
-        ordered = _stale(cells, int(cfg.get("max_age_days", 7)), force)
-        todo = [c for c in ordered if c["_age"] >= int(cfg.get("max_age_days", 7))
-                or force]
+        ordered = _stale(cells, int(cfg.get("max_age_days", 7)), force,
+                         int(cfg.get("max_fails", 5)))
+        todo = [c for c in ordered
+                if force or (c["_age"] >= int(cfg.get("max_age_days", 7))
+                             and c["_fails"] < int(cfg.get("max_fails", 5)))]
         if limit:
             todo = todo[:limit]
         out(f"[scan] 组合 {len(cells)} 个，其中需要重跑 {len(todo)} 个"

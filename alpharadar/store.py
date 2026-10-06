@@ -247,6 +247,22 @@ def last_ok(symbol: str, strategy: str, freq: str,
     return dict(r) if r else None
 
 
+def consecutive_failures(symbol: str, strategy: str, freq: str,
+                         path: Path | None = None) -> int:
+    """最近连续失败次数（用于给坏组合设重试上限）。"""
+    with connect(path) as con:
+        rows = con.execute(
+            "SELECT status FROM results WHERE symbol=? AND strategy=? AND freq=? "
+            "ORDER BY id DESC LIMIT 10", (symbol, strategy, freq)).fetchall()
+    n = 0
+    for r in rows:
+        if r["status"] == "error":
+            n += 1
+        else:
+            break
+    return n
+
+
 # ---------- 调度状态 ----------
 def set_state(key: str, value, path: Path | None = None) -> None:
     from datetime import datetime

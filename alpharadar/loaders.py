@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 
 from .tushare_client import FREQS, TushareClient
-from .universe import Instrument, resolve
+from .universe import Instrument, is_fund, resolve
 
 
 def _segments(mapping: pd.DataFrame) -> list[tuple[str, str, str]]:
@@ -77,8 +77,11 @@ def load_bars(symbol: str, freq: str = "1d", start: str = "20220101",
     cli = client or TushareClient()
 
     if inst.market == "stock":
-        raw = (cli.stk_daily(inst.ts_code, start, end) if freq == "1d"
-               else cli.stk_minutes(inst.ts_code, freq, start, end))
+        if freq == "1d":
+            raw = (cli.fund_daily(inst.ts_code, start, end) if is_fund(inst.ts_code)
+                   else cli.stk_daily(inst.ts_code, start, end))
+        else:
+            raw = cli.stk_minutes(inst.ts_code, freq, start, end)
         raw["trade_time"] = (pd.to_datetime(raw["trade_date"])
                              if freq == "1d" else pd.to_datetime(raw["trade_time"]))
         raw["sdate"] = raw["trade_time"].dt.strftime("%Y%m%d")

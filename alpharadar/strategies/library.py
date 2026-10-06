@@ -158,6 +158,7 @@ _VR_DEFAULTS = {
 
 @register("vreversal", "冰点反转", source="原创（形态来自沪银 2606 一分钟图）",
           license="MIT", defaults=_VR_DEFAULTS,
+          freqs=("1min", "5min", "15min", "30min", "60min"),
           notes="量能高潮创新低 → V 型回抽 → 二次探底抬高 → 均线粘合后突破箱体。")
 def _vreversal(df: pd.DataFrame, p: dict) -> pd.DataFrame:
     n = len(df)
@@ -251,6 +252,7 @@ _ORB_DEFAULTS = {"ib_end": "0930", "ib_ext": 1.0, "ib_min_atr": 1.0,
 
 @register("orb", "开盘区间突破", source="TradingView @LuxAlgo（Initial Balance Breakout）",
           license="CC BY-NC-SA 4.0", defaults=_ORB_DEFAULTS,
+          freqs=("1min", "5min", "15min", "30min", "60min"),
           notes="开盘首 30 分钟为箱体，突破上/下沿入场，目标 = 箱体高度 × 倍数。")
 def _orb(df: pd.DataFrame, p: dict) -> pd.DataFrame:
     n = len(df)

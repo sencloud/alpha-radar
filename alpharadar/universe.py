@@ -86,6 +86,16 @@ def resolve(symbol: str) -> Instrument:
                       margin=0.10, sessions=(("0900", "1500"),))
 
 
+def is_fund(symbol: str) -> bool:
+    """ETF / LOF 判断：这类代码要用 tushare 的 fund_daily，而不是 daily。
+
+    踩过的坑：把 510300.SH 当普通股票取数，daily 返回空 -> 「未取到日线」。
+    规则：沪市 5 开头（50/51/52/56/58…）、深市 15/16 开头是基金。
+    """
+    code = symbol.split(".")[0]
+    return code.startswith(("5", "15", "16")) and len(code) == 6
+
+
 def list_presets(market: str | None = None) -> list[Instrument]:
     items = list(PRESETS.values())
     return [i for i in items if market is None or i.market == market]

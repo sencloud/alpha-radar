@@ -124,6 +124,10 @@ class TushareClient:
     def stk_daily(self, code: str, start: str, end: str) -> pd.DataFrame:
         return self._daily_like("daily", code, start, end, "trade_date")
 
+    def fund_daily(self, code: str, start: str, end: str) -> pd.DataFrame:
+        """ETF / LOF 日线（与股票日线接口不同）。"""
+        return self._daily_like("fund_daily", code, start, end, "trade_date")
+
     def stk_minutes(self, code: str, freq: str, start: str, end: str) -> pd.DataFrame:
         """A 股分钟线（stk_mins，需要相应权限）。"""
         return self._minutes_like("stk_mins", code, freq, start, end)

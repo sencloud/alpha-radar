@@ -181,8 +181,12 @@ def test_scheduler_cells_and_universe():
            "futures": {"freqs": ["5min", "1d"], "symbols": ["P.DCE", "Y.DCE"]},
            "stocks": {"freqs": ["1d"], "symbols": ["600519.SH"]}}
     cells = scheduler.build_cells(cfg)
-    assert len(cells) == (2 * 2 + 1) * 2      # (品种×周期) × 策略
+    # orb 只支持日内周期：futures 5min 两个策略、1d 只剩 utbot；stocks 1d 只剩 utbot
+    # = 2 × (2 + 1) + 1 = 7
+    assert len(cells) == 7
     assert {c["market"] for c in cells} == {"futures", "stocks"}
+    assert not any(c["strategy"] == "orb" and c["freq"] == "1d" for c in cells)
+    assert any(c["strategy"] == "orb" and c["freq"] == "5min" for c in cells)
 
 
 def _fake_scripts(n=5):
