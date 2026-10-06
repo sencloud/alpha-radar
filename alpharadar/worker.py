@@ -34,6 +34,16 @@ def _free_gb(path: str = "/") -> float:
         return 999.0
 
 
+def _gen_mtime() -> float:
+    """自动移植产物（generated.py）的修改时间，用于热加载判断。"""
+    try:
+        import os
+        from .strategies import GENERATED
+        return os.path.getmtime(GENERATED) if GENERATED.exists() else 0.0
+    except Exception:
+        return 0.0
+
+
 def _start_for(cfg: dict, market: str, freq: str) -> str:
     blk = (cfg.get("auto") or {}).get("stocks" if market == "stocks" else "futures") or {}
     if freq == "1d":
@@ -59,6 +69,7 @@ def run_worker(cfg: dict, minutes: float = 60.0, limit: int = 0,
     cur_symbol = None
     evicted_files = 0
     evicted_mb = 0.0
+    gen_mtime = _gen_mtime()
     run_id = store.start_run("worker", f"budget={minutes}min")
     cfg_cache = (cfg.get("cache") or {}).get("max_gb", 0)
     cache_max_gb = cache_max_gb or float(cfg_cache or 0)
@@ -117,6 +128,16 @@ def run_worker(cfg: dict, minutes: float = 60.0, limit: int = 0,
                 continue
 
             t = tasks[0]
+            # 自动移植会往 generated.py 追加新策略；这里热加载，
+            # 不必等 worker 12 小时重启就能用上新策略（踩过：新策略要等一轮才生效）
+            if _gen_mtime() != gen_mtime:
+                try:
+                    import alpharadar.strategies as _S
+                    _S.load_generated()
+                    gen_mtime = _gen_mtime()
+                    out(f"  [reload] 检测到新移植的策略，已热加载")
+                except Exception as exc:
+                    out(f"  [reload] 热加载失败（忽略）：{type(exc).__name__}")
             sym, strat, freq = t["symbol"], t["strategy"], t["freq"]
             market = t.get("market") or "futures"
             start = _start_for(cfg, market, freq)

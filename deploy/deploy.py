@@ -45,8 +45,8 @@ EXCLUDE = {".git", "data", "data_cache", "reports", "corpus", "dist", ".venv",
 EXCLUDE_FILES = {".env"}
 EXCLUDE_SUFFIX = (".db", ".db-wal", ".db-shm", ".lock", ".pyc")
 
-ALL_STEPS = ("pack", "upload", "user", "venv", "env", "systemd", "worker", "schedule",
-             "caddy", "firewall", "verify")
+ALL_STEPS = ("pack", "upload", "user", "venv", "env", "systemd", "worker",
+             "autoport", "schedule", "caddy", "firewall", "verify")
 
 
 # ==================== Workbench 封装 ====================
@@ -181,6 +181,16 @@ def step_env() -> None:
        f"chmod 600 {APP}/.env && chown {USER}:{USER} {APP}/.env && "
        f"grep -c . {APP}/.env && "
        f"grep -q '^TUSHARE_TOKEN=..*' {APP}/.env && echo 'TUSHARE_TOKEN 已就位'")
+    # 自动移植需要 LLM 凭据：同机 lastdays 项目已有 DeepSeek 配置，直接复用
+    # （同一个账号、同一台机；只在 alpha-radar 自己缺这三个键时才补）
+    sh(f"for k in LLM_API_KEY LLM_BASE_URL LLM_MODEL; do "
+       f"  grep -q \"^$k=..*\" {APP}/.env || {{ "
+       f"    v=$(grep -m1 \"^$k=\" /opt/lastdays/.env 2>/dev/null); "
+       f"    [ -n \"$v\" ] && echo \"$v\" >> {APP}/.env && echo \"[env] 复用 lastdays 的 $k\"; "
+       f"  }}; "
+       f"done; "
+       f"grep -q '^LLM_API_KEY=..*' {APP}/.env && echo 'LLM 凭据已就位' || "
+       f"echo '[warn] 缺 LLM 凭据：自动移植不可用（其余功能不受影响）'")
     print("[env] .env 已就位（LF + 600）")
 
 
@@ -209,6 +219,17 @@ def step_worker() -> None:
        f"systemctl restart {SVC}-worker && sleep 3 && "
        f"systemctl is-active {SVC}-worker")
     print("[worker] 全市场 worker 已启动")
+
+
+def step_autoport() -> None:
+    """安装 LLM 自动移植服务（依赖 .env 里的 LLM_API_KEY / LLM_BASE_URL / LLM_MODEL）。"""
+    sh(f"cp {APP}/deploy/{SVC}-autoport.service /etc/systemd/system/ && "
+       f"systemctl daemon-reload && systemctl enable {SVC}-autoport >/dev/null 2>&1; "
+       f"grep -q '^LLM_API_KEY=..*' {APP}/.env && echo '[env] LLM_API_KEY 已配置' || "
+       f"echo '[warn] .env 缺 LLM_API_KEY，autoport 会启动失败'; "
+       f"systemctl restart {SVC}-autoport && sleep 3 && "
+       f"systemctl is-active {SVC}-autoport")
+    print("[autoport] 自动移植服务已启动")
 
 
 def step_caddy() -> None:
@@ -246,7 +267,8 @@ def step_verify() -> bool:
     print(f"[verify] 本机 healthz: {health.strip()[:200]}")
     ok &= '"ok": true' in health.replace("'", '"')
 
-    svc = sh(f"systemctl is-active {SVC} {SVC}-scheduler.timer {SVC}-worker").split()
+    svc = sh(f"systemctl is-active {SVC} {SVC}-scheduler.timer {SVC}-worker "
+             f"{SVC}-autoport").split()
     print(f"[verify] 服务状态: {svc}")
 
     for url, must in [(f"https://{DOMAIN}/api/health", True),
@@ -315,6 +337,8 @@ def main() -> int:
             step_schedule()
         elif s == "worker":
             step_worker()
+        elif s == "autoport":
+            step_autoport()
         elif s == "caddy":
             step_caddy()
         elif s == "firewall":

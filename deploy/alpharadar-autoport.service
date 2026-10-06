@@ -1,0 +1,46 @@
+# alpha-radar 自动移植（LLM 驱动，常驻后台）
+#
+# 安装：
+#   sudo cp deploy/alpharadar-autoport.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now alpharadar-autoport
+#
+# 它做什么：取分诊清单里分数最高的待移植脚本 -> 交给 DeepSeek 翻译 ->
+# 四道闸门校验 -> 通过才写入 strategies/generated.py 并进入任务队列。
+#
+# 成本控制：--pace 90（每个之间等 90 秒）、--daily-cap 120（每日上限）。
+# 每 12 小时自然退出重启一次，顺便重读代码与配置。
+
+[Unit]
+Description=alpha-radar auto porter (LLM pine -> python)
+Documentation=https://alpha-radar.infiniti.website/runs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=alpharadar
+Group=alpharadar
+WorkingDirectory=/opt/alpha-radar
+EnvironmentFile=/opt/alpha-radar/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/alpha-radar/.venv/bin/python -m alpharadar.porting.autoport --minutes 720 --max-ports 0 --pace 90 --daily-cap 120
+Restart=always
+RestartSec=60
+TimeoutStopSec=120
+
+Nice=10
+CPUWeight=20
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/alpha-radar/data
+ReadWritePaths=/opt/alpha-radar/alpharadar/strategies
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=alpharadar-autoport
+
+[Install]
+WantedBy=multi-user.target

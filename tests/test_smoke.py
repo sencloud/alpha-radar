@@ -484,3 +484,77 @@ def test_scaffold_worksheet_contains_key_parts(tmp_path):
                  "verify", "硬要求"):
         assert part in text, f"工单缺少 {part}"
     f.unlink()
+
+
+# ==================== 自动移植（LLM 生成代码的安全边界） ====================
+def test_extract_code_strips_fence():
+    from alpharadar.porting.autoport import _extract_code
+
+    txt = "说明\n```python\n@register('x','y')\ndef _x(df,p): pass\n```\n尾巴"
+    assert _extract_code(txt).startswith("@register")
+    try:
+        _extract_code("这里没有代码")
+        raise AssertionError("应该抛错")
+    except RuntimeError as exc:
+        assert "@register" in str(exc)
+
+
+def test_autoport_rolls_back_on_gate_failure(monkeypatch):
+    """最关键的安全边界：闸门不过时必须回滚，绝不能在 generated.py 留下坏代码。"""
+    import alpharadar.porting.autoport as ap
+
+    before = ap.GEN.read_text(encoding="utf-8") if ap.GEN.exists() else None
+    # 一个偷看未来的实现：闸门 1 必须拦住它
+    bad = ('@register("tv_zzzzzzzzzz", "bad", defaults={})\n'
+           'def _tv_zzzzzzzzzz(df, p):\n'
+           '    c = df["close"].astype(float)\n'
+           '    sig = np.zeros(len(df), dtype=np.int8)\n'
+           '    fut = c.shift(-1).to_numpy()\n'
+           '    cur = c.to_numpy()\n'
+           '    sig[:-1] = np.where(fut[:-1] > cur[:-1], 1, -1)\n'
+           '    return signal_frame(df, sig, min_bars=0)\n')
+    monkeypatch.setattr(ap, "_llm", lambda *a, **k: f"```python\n{bad}```")
+    monkeypatch.setattr(ap.scaffold, "make_worksheet", lambda sid: "fake worksheet")
+
+    res = ap.port_one({"sid": "PUB;zzzzzzzzzz", "title": "t", "family": "trend",
+                       "score": 1}, max_tries=1, verbose=lambda *a: None)
+    assert not res["ok"]
+    assert "未来数据" in res["errors"][0]
+    now = ap.GEN.read_text(encoding="utf-8") if ap.GEN.exists() else None
+    # 关键性质：被拒的代码不能留在文件里（允许文件被创建成只有文件头）
+    assert not now or ("tv_zzzzzzzzzz" not in now and "shift(-1)" not in now)
+    assert res["key"] not in __import__("alpharadar.strategies",
+                                        fromlist=["REGISTRY"]).REGISTRY
+
+
+def test_autoport_accepts_good_code(monkeypatch):
+    """一个干净实现应当通过闸门并进入注册表。"""
+    import alpharadar.porting.autoport as ap
+    from alpharadar.strategies import REGISTRY
+
+    before = ap.GEN.read_text(encoding="utf-8") if ap.GEN.exists() else None
+    key = "tv_goodgood00"
+    good = (f'@register("{key}", "good", defaults={{"n": 20}})\n'
+            f'def _{key}(df, p):\n'
+            '    c = df["close"].astype(float)\n'
+            '    m = c.rolling(int(p["n"]), min_periods=int(p["n"])).mean()\n'
+            '    up = (c > m).to_numpy()\n'
+            '    sig = np.zeros(len(df), dtype=np.int8)\n'
+            '    sig[1:] = np.where(up[1:] != up[:-1], np.where(up[1:], 1, -1), 0)\n'
+            '    stop = np.where(sig == 1, c.to_numpy() - df["atr"].to_numpy(),\n'
+            '                    np.where(sig == -1, c.to_numpy() + df["atr"].to_numpy(), np.nan))\n'
+            '    return signal_frame(df, sig, stop=stop, st_stop=stop)\n')
+    monkeypatch.setattr(ap, "_llm", lambda *a, **k: f"```python\n{good}```")
+    monkeypatch.setattr(ap.scaffold, "make_worksheet", lambda sid: "fake worksheet")
+
+    try:
+        res = ap.port_one({"sid": "PUB;goodgood00", "title": "t",
+                           "family": "trend", "score": 1}, max_tries=1,
+                          verbose=lambda *a: None)
+        assert res["ok"] and res["key"] in REGISTRY
+    finally:
+        if before is None:                                   # 清理到测试前状态
+            ap.GEN.unlink(missing_ok=True)
+        else:
+            ap.GEN.write_text(before, encoding="utf-8")
+        ap._reload()
