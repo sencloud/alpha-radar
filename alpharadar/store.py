@@ -355,15 +355,34 @@ def sync_tasks(strategy_freqs: dict, path: Path | None = None) -> tuple[int, int
     return int(after - before), int(after)
 
 
-def claim_tasks(limit: int = 1, path: Path | None = None) -> list[dict]:
-    """取一批到期的任务（串行 worker 用 limit=1 即可），带上品种信息。"""
+def claim_tasks(limit: int = 1, symbol: str = "",
+                path: Path | None = None) -> list[dict]:
+    """取一批到期的任务（串行 worker 用 limit=1 即可），带上品种信息。
+
+    symbol 非空时只取该品种 —— worker 按品种成批处理，这样行情数据
+    只下载一次、用完即删，不会因为任务交错而反复下载同一份数据。
+    """
+    with connect(path) as con:
+        sql = ("SELECT t.*, i.name name, i.market market FROM tasks t "
+               "LEFT JOIN instruments i ON i.symbol=t.symbol "
+               "WHERE (t.next_due IS NULL OR t.next_due <= datetime('now')) ")
+        args: list = []
+        if symbol:
+            sql += "AND t.symbol=? "
+            args.append(symbol)
+        sql += "ORDER BY COALESCE(t.next_due,'') , t.id LIMIT ?"
+        rows = con.execute(sql, [*args, limit]).fetchall()
+    return [dict(r) for r in rows]
+
+
+def next_due_symbols(limit: int = 20, path: Path | None = None) -> list[str]:
+    """有到期任务的品种列表，按最早到期时间排序（worker 按此顺序逐品种处理）。"""
     with connect(path) as con:
         rows = con.execute(
-            "SELECT t.*, i.name name, i.market market FROM tasks t "
-            "LEFT JOIN instruments i ON i.symbol=t.symbol "
-            "WHERE t.next_due IS NULL OR t.next_due <= datetime('now') "
-            "ORDER BY COALESCE(t.next_due,'') , t.id LIMIT ?", (limit,)).fetchall()
-    return [dict(r) for r in rows]
+            "SELECT symbol, MIN(COALESCE(next_due,'')) d FROM tasks "
+            "WHERE next_due IS NULL OR next_due <= datetime('now') "
+            "GROUP BY symbol ORDER BY d, symbol LIMIT ?", (limit,)).fetchall()
+    return [r["symbol"] for r in rows]
 
 
 def finish_task(task_id: int, status: str, requeue_days: int = 7,

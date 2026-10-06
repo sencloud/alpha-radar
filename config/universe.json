@@ -5,6 +5,10 @@
   "harvest_max_fetch": 300,
   "harvest_feed_pages": 50,
   "harvest_forum_pages": 50,
+  "cache": {
+    "_说明": "磁盘有限：worker 按品种回收行情缓存，用完即删、需要时再下。扩容后把 max_gb 调大或给 worker 加 --keep-cache。",
+    "max_gb": 3.0
+  },
   "strategies": [
     "utbot",
     "supertrend",

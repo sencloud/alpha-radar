@@ -35,6 +35,8 @@ class TushareClient:
         self.cache.mkdir(parents=True, exist_ok=True)
         self.interval = interval
         self._last = 0.0
+        # 记录本进程写过哪些缓存文件，供 worker 做「按品种回收」
+        self.written: set[str] = set()
 
     # ---------- 基础 ----------
     def _throttle(self) -> None:
@@ -87,6 +89,57 @@ class TushareClient:
         f, c = self._cache_paths(key)
         df.to_csv(f, index=False)
         c.write_text(json.dumps({"min": dmin, "max": dmax}), encoding="utf-8")
+        self.written.add(f.name)
+        self.written.add(c.name)
+
+    # ---------- 缓存回收 ----------
+    def cache_gb(self) -> float:
+        total = sum(p.stat().st_size for p in self.cache.glob("*") if p.is_file())
+        return total / 1e9
+
+    def evict_written(self, keep_mapping: bool = True) -> tuple[int, float]:
+        """删除本进程写过的缓存文件（映射表默认保留：小、且每个任务都要用）。
+
+        返回 (删除文件数, 释放 MB)。
+        """
+        import os
+        n, freed = 0, 0
+        for name in list(self.written):
+            if keep_mapping and "_mapping" in name:
+                continue
+            p = self.cache / name
+            try:
+                if p.exists():
+                    freed += p.stat().st_size
+                    os.remove(p)
+                    n += 1
+            except OSError:
+                pass
+        self.written.clear()
+        return n, freed / 1e6
+
+    def evict_lru(self, target_gb: float, keep_mapping: bool = True) -> tuple[int, float]:
+        """按修改时间从旧到新删，直到缓存降到 target_gb 以下（全局兜底）。"""
+        import os
+        n, freed = 0, 0
+        files = [p for p in self.cache.glob("*") if p.is_file()]
+        if keep_mapping:
+            files = [p for p in files if "_mapping" not in p.name]
+        files.sort(key=lambda p: p.stat().st_mtime)
+        cur = self.cache_gb()
+        for p in files:
+            if cur <= target_gb:
+                break
+            try:
+                size = p.stat().st_size
+                os.remove(p)
+                self.written.discard(p.name)
+                n += 1
+                freed += size
+                cur -= size / 1e9
+            except OSError:
+                pass
+        return n, freed / 1e6
 
     # ---------- 期货 ----------
     def fut_mapping(self, symbol: str, start: str, end: str) -> pd.DataFrame:

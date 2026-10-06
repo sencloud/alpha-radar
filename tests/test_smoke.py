@@ -338,3 +338,45 @@ def test_task_stats_shape(tmp_path):
     assert st["total"] == 2 and st["due"] == 2
     assert st["by_market"] == {"futures": 2}
     assert st["by_freq"] == {"1d": 2}
+
+
+def test_cache_eviction_keeps_mapping(tmp_path):
+    """磁盘回收：删本进程写过的合约行情，但保留主力映射表（小且每个任务都要用）。"""
+    from alpharadar.tushare_client import TushareClient
+
+    cli = TushareClient.__new__(TushareClient)      # 不触发 token 校验
+    cli.cache = tmp_path
+    cli.written = set()
+    names = ["P2505.DCE_ft_mins_5min.csv", "P2505.DCE_ft_mins_5min.csv.cover.json",
+             "P2505.DCE_fut_daily.csv", "P.DCE_mapping.csv", "P.DCE_mapping.csv.cover.json"]
+    for n in names:
+        (tmp_path / n).write_text("x" * 100)
+    cli.written = set(names)
+
+    n, mb = cli.evict_written()
+    left = {p.name for p in tmp_path.glob("*")}
+    assert n == 3 and mb > 0
+    assert left == {"P.DCE_mapping.csv", "P.DCE_mapping.csv.cover.json"}
+    assert cli.written == set()                     # 记录要清空，避免误删下一批
+
+
+def test_cache_lru_eviction(tmp_path):
+    """全局兜底：超限时按 mtime 从旧到新删，映射表依旧保留。"""
+    import os
+    import time as _t
+    from alpharadar.tushare_client import TushareClient
+
+    cli = TushareClient.__new__(TushareClient)
+    cli.cache = tmp_path
+    cli.written = set()
+    big = 400_000
+    for i, name in enumerate(["a_ft_mins_1min.csv", "b_ft_mins_1min.csv",
+                              "c_ft_mins_1min.csv", "RB.DCE_mapping.csv"]):
+        p = tmp_path / name
+        p.write_text("x" * big)
+        os.utime(p, (_t.time() - 1000 + i * 10, _t.time() - 1000 + i * 10))
+    total_before = sum(p.stat().st_size for p in tmp_path.glob("*"))
+    n, _ = cli.evict_lru(target_gb=total_before / 1e9 * 0.5)
+    left = {p.name for p in tmp_path.glob("*")}
+    assert n >= 1 and "RB.DCE_mapping.csv" in left
+    assert "a_ft_mins_1min.csv" not in left         # 最旧的先删

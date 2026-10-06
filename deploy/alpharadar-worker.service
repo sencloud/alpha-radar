@@ -23,7 +23,7 @@ Group=alpharadar
 WorkingDirectory=/opt/alpha-radar
 EnvironmentFile=/opt/alpha-radar/.env
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/alpha-radar/.venv/bin/python -m alpharadar.worker --minutes 720 --sync
+ExecStart=/opt/alpha-radar/.venv/bin/python -m alpharadar.worker --minutes 720 --sync --cache-max-gb 3
 Restart=always
 RestartSec=30
 TimeoutStopSec=120

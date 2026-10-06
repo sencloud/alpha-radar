@@ -44,14 +44,27 @@ def _start_for(cfg: dict, market: str, freq: str) -> str:
 def run_worker(cfg: dict, minutes: float = 60.0, limit: int = 0,
                poll_seconds: int = 60, min_free_gb: float = 2.0,
                requeue_days: int = 7, client: TushareClient | None = None,
-               out=print, log_every: int = 5) -> dict:
-    """串行跑到期任务。minutes=0 表示不限时（常驻）。limit>0 表示本轮最多跑几个。"""
+               out=print, log_every: int = 5, cache_max_gb: float = 0.0,
+               keep_cache: bool = False) -> dict:
+    """串行跑到期任务。minutes=0 表示不限时（常驻）。limit>0 表示本轮最多跑几个。
+
+    磁盘策略：**按品种成批处理，处理完立即删掉该品种的行情缓存**（保留很小的
+    主力映射表）。同一个品种有 6~11 个任务共用一份行情，成批处理只下载一次。
+    cache_max_gb>0 时再加一道全局兜底：缓存超限就按 LRU 删到限额以下。
+    """
     store.init()
     cli = client or TushareClient()
     t0 = time.time()
     n_ok = n_err = 0
+    cur_symbol = None
+    evicted_files = 0
+    evicted_mb = 0.0
     run_id = store.start_run("worker", f"budget={minutes}min")
-    out(f"[worker] 启动：时间预算 {minutes or '∞'} 分钟，串行执行")
+    cfg_cache = (cfg.get("cache") or {}).get("max_gb", 0)
+    cache_max_gb = cache_max_gb or float(cfg_cache or 0)
+    out(f"[worker] 启动：时间预算 {minutes or '∞'} 分钟，串行执行；"
+        f"缓存策略 {'保留' if keep_cache else '按品种回收'}，"
+        f"全局上限 {cache_max_gb or '不限'}GB")
     try:
         while True:
             if minutes and (time.time() - t0) / 60.0 >= minutes:
@@ -65,7 +78,37 @@ def run_worker(cfg: dict, minutes: float = 60.0, limit: int = 0,
                 time.sleep(600)
                 continue
 
-            tasks = store.claim_tasks(1)
+            # 先把手上的品种做完，再换下一个（保证一份行情只下一次）
+            if cur_symbol:
+                tasks = store.claim_tasks(1, symbol=cur_symbol)
+                if tasks:
+                    if not keep_cache and cache_max_gb and cli.cache_gb() > cache_max_gb:
+                        n, mb = cli.evict_lru(cache_max_gb * 0.8)
+                        evicted_files += n
+                        evicted_mb += mb
+                        if n:
+                            out(f"  [cache] 缓存超 {cache_max_gb}GB，"
+                                f"LRU 回收 {n} 个文件 {mb:.1f}MB")
+                else:
+                    if not keep_cache:
+                        n, mb = cli.evict_written()
+                        evicted_files += n
+                        evicted_mb += mb
+                        if n:
+                            out(f"  [cache] {cur_symbol} 完成，回收 {n} 个文件 "
+                                f"{mb:.1f}MB")
+                    cur_symbol = None
+                    continue
+            else:
+                syms = store.next_due_symbols(5)
+                if not syms:
+                    st = store.task_stats()
+                    out(f"[worker] 暂无到期任务（共 {st['total']} 个，"
+                        f"已完成 {st['ok']}）；等待 {poll_seconds}s")
+                    time.sleep(poll_seconds)
+                    continue
+                cur_symbol = syms[0]
+                tasks = store.claim_tasks(1, symbol=cur_symbol)
             if not tasks:
                 st = store.task_stats()
                 out(f"[worker] 暂无到期任务（共 {st['total']} 个，已完成 {st['ok']}）；"
@@ -124,7 +167,10 @@ def run_worker(cfg: dict, minutes: float = 60.0, limit: int = 0,
         st = store.task_stats()
         store.set_state("worker", {"finished": datetime.now().isoformat(timespec="seconds"),
                                    "running": False, "ok": n_ok, "err": n_err,
-                                   "seconds": round(time.time() - t0), **st})
+                                   "seconds": round(time.time() - t0),
+                                   "cache_gb": round(cli.cache_gb(), 2),
+                                   "evicted_files": evicted_files,
+                                   "evicted_mb": round(evicted_mb, 1), **st})
         store.finish_run(run_id, "ok" if n_err == 0 else "partial", n_ok, n_err)
         out(f"[worker] 结束：成功 {n_ok} 失败 {n_err}，"
             f"队列 {st['total']}（完成 {st['ok']}，待跑 {st['due']}）")
@@ -143,6 +189,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--poll", type=int, default=60, help="无到期任务时的轮询间隔（秒）")
     ap.add_argument("--min-free-gb", type=float, default=2.0, help="磁盘下限，低于则暂停")
     ap.add_argument("--requeue-days", type=int, default=7, help="成功后多久重跑")
+    ap.add_argument("--cache-max-gb", type=float, default=0.0,
+                    help="缓存全局上限（GB），超过按 LRU 回收；0=用配置值")
+    ap.add_argument("--keep-cache", action="store_true",
+                    help="不做按品种回收（磁盘充足时用，可省掉重复下载）")
     ap.add_argument("--sync", action="store_true", help="先同步全市场品种与任务队列")
     ap.add_argument("--universe", default=str(config.ROOT / "config" / "universe.json"))
     args = ap.parse_args(argv)
@@ -157,7 +207,8 @@ def main(argv: list[str] | None = None) -> int:
         sync_instruments(cli, cfg, verbose=print)
     run_worker(cfg, minutes=args.minutes, limit=args.limit,
                poll_seconds=args.poll, min_free_gb=args.min_free_gb,
-               requeue_days=args.requeue_days, client=cli)
+               requeue_days=args.requeue_days, client=cli,
+               cache_max_gb=args.cache_max_gb, keep_cache=args.keep_cache)
     return 0
 
 
