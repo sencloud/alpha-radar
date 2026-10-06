@@ -39,6 +39,23 @@ CREATE TABLE IF NOT EXISTS results(
 );
 CREATE INDEX IF NOT EXISTS idx_res_sym ON results(symbol, strategy, freq, ts);
 CREATE TABLE IF NOT EXISTS state(k TEXT PRIMARY KEY, v TEXT, ts TEXT);
+
+-- 全市场任务队列：品种 × 策略 × 周期 一个格子，按 next_due 轮转
+CREATE TABLE IF NOT EXISTS instruments(
+  symbol TEXT PRIMARY KEY, name TEXT, market TEXT,
+  freqs TEXT,                 -- 逗号分隔的可用周期
+  active INTEGER DEFAULT 1, updated_at TEXT
+);
+CREATE TABLE IF NOT EXISTS tasks(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  symbol TEXT NOT NULL, strategy TEXT NOT NULL, freq TEXT NOT NULL,
+  state TEXT DEFAULT 'pending',      -- pending | running | done | error
+  next_due TEXT, attempts INTEGER DEFAULT 0,
+  last_status TEXT, last_ts TEXT, last_error TEXT,
+  UNIQUE(symbol, strategy, freq)
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_due ON tasks(next_due);
+CREATE INDEX IF NOT EXISTS idx_tasks_state ON tasks(state, next_due);
 """
 
 RESULT_COLS = ("run_id", "ts", "symbol", "name", "market", "strategy", "freq",
@@ -282,3 +299,102 @@ def get_state(key: str, default=None, path: Path | None = None):
         return {"value": json.loads(r["v"]), "ts": r["ts"]}
     except Exception:
         return default
+
+
+# ==================== 全市场任务队列 ====================
+def sync_instruments(rows: list[dict], path: Path | None = None) -> int:
+    """写入/更新品种表。rows: [{symbol,name,market,freqs}]"""
+    from datetime import datetime
+    now = datetime.now().isoformat(timespec="seconds")
+    with connect(path) as con:
+        for r in rows:
+            con.execute(
+                "INSERT INTO instruments(symbol,name,market,freqs,active,updated_at) "
+                "VALUES(?,?,?,?,1,?) ON CONFLICT(symbol) DO UPDATE SET "
+                "name=excluded.name, market=excluded.market, freqs=excluded.freqs, "
+                "active=1, updated_at=excluded.updated_at",
+                (r["symbol"], r.get("name", ""), r.get("market", ""),
+                 ",".join(r.get("freqs", [])), now))
+        n = con.execute("SELECT COUNT(*) c FROM instruments WHERE active=1").fetchone()["c"]
+    return int(n)
+
+
+def list_instruments(market: str = "", path: Path | None = None) -> list[dict]:
+    with connect(path) as con:
+        if market:
+            rows = con.execute("SELECT * FROM instruments WHERE active=1 AND market=? "
+                               "ORDER BY symbol", (market,)).fetchall()
+        else:
+            rows = con.execute("SELECT * FROM instruments WHERE active=1 "
+                               "ORDER BY market, symbol").fetchall()
+    return [dict(r) for r in rows]
+
+
+def sync_tasks(strategy_freqs: dict, path: Path | None = None) -> tuple[int, int]:
+    """按 品种 × 策略 × 可用周期 补齐任务队列，返回 (新增, 总数)。
+
+    strategy_freqs: {策略key: 允许的周期元组}，空元组表示不限。
+    日内形态（orb/vreversal）配日线必然 0 笔，不能进队列浪费算力。
+    """
+    with connect(path) as con:
+        ins = con.execute("SELECT symbol, freqs FROM instruments WHERE active=1").fetchall()
+        pairs = []
+        for r in ins:
+            for fq in (r["freqs"] or "").split(","):
+                if not fq:
+                    continue
+                for st, allow in strategy_freqs.items():
+                    if allow and fq not in allow:
+                        continue
+                    pairs.append((r["symbol"], st, fq))
+        before = con.execute("SELECT COUNT(*) c FROM tasks").fetchone()["c"]
+        con.executemany(
+            "INSERT OR IGNORE INTO tasks(symbol,strategy,freq,state,next_due) "
+            "VALUES(?,?,?,'pending',datetime('now'))", pairs)
+        after = con.execute("SELECT COUNT(*) c FROM tasks").fetchone()["c"]
+    return int(after - before), int(after)
+
+
+def claim_tasks(limit: int = 1, path: Path | None = None) -> list[dict]:
+    """取一批到期的任务（串行 worker 用 limit=1 即可），带上品种信息。"""
+    with connect(path) as con:
+        rows = con.execute(
+            "SELECT t.*, i.name name, i.market market FROM tasks t "
+            "LEFT JOIN instruments i ON i.symbol=t.symbol "
+            "WHERE t.next_due IS NULL OR t.next_due <= datetime('now') "
+            "ORDER BY COALESCE(t.next_due,'') , t.id LIMIT ?", (limit,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def finish_task(task_id: int, status: str, requeue_days: int = 7,
+                fail_backoff_hours: int = 6, err: str = "",
+                path: Path | None = None) -> None:
+    """标记任务结果并按结果安排下次执行时间。"""
+    if status == "ok":
+        due = f"datetime('now','+{int(requeue_days)} days')"
+    else:
+        due = f"datetime('now','+{int(fail_backoff_hours)} hours')"
+    with connect(path) as con:
+        con.execute(
+            f"UPDATE tasks SET state=?, next_due={due}, "
+            "attempts=attempts+1, last_status=?, last_ts=datetime('now'), "
+            "last_error=? WHERE id=?",
+            (status, status, (err or "")[:300], task_id))
+
+
+def task_stats(path: Path | None = None) -> dict:
+    with connect(path) as con:
+        r = con.execute(
+            "SELECT COUNT(*) total, "
+            "SUM(state='ok') ok, SUM(state='error') err, "
+            "SUM(next_due IS NULL OR next_due<=datetime('now')) due "
+            "FROM tasks").fetchone()
+        by_market = con.execute(
+            "SELECT i.market market, COUNT(*) n FROM tasks t "
+            "JOIN instruments i ON i.symbol=t.symbol GROUP BY i.market").fetchall()
+        by_freq = con.execute(
+            "SELECT freq, COUNT(*) n FROM tasks GROUP BY freq ORDER BY n DESC").fetchall()
+    return {"total": int(r["total"] or 0), "ok": int(r["ok"] or 0),
+            "err": int(r["err"] or 0), "due": int(r["due"] or 0),
+            "by_market": {x["market"]: x["n"] for x in by_market},
+            "by_freq": {x["freq"]: x["n"] for x in by_freq}}

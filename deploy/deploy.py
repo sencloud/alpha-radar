@@ -45,7 +45,7 @@ EXCLUDE = {".git", "data", "data_cache", "reports", "corpus", "dist", ".venv",
 EXCLUDE_FILES = {".env"}
 EXCLUDE_SUFFIX = (".db", ".db-wal", ".db-shm", ".lock", ".pyc")
 
-ALL_STEPS = ("pack", "upload", "user", "venv", "env", "systemd", "schedule",
+ALL_STEPS = ("pack", "upload", "user", "venv", "env", "systemd", "worker", "schedule",
              "caddy", "firewall", "verify")
 
 
@@ -197,6 +197,15 @@ def step_schedule() -> None:
     print("[schedule] 定时扫描已启用（每 6 小时）")
 
 
+def step_worker() -> None:
+    """安装全市场串行 worker（常驻服务）。"""
+    sh(f"cp {APP}/deploy/{SVC}-worker.service /etc/systemd/system/ && "
+       f"systemctl daemon-reload && systemctl enable {SVC}-worker >/dev/null 2>&1; "
+       f"systemctl restart {SVC}-worker && sleep 3 && "
+       f"systemctl is-active {SVC}-worker")
+    print("[worker] 全市场 worker 已启动")
+
+
 def step_caddy() -> None:
     # 只写自己的 snippet；主 Caddyfile 仅在缺 import 行时追加，且先备份
     sh(f"install -m 644 {APP}/deploy/{SVC}.caddy /etc/caddy/conf.d/{SVC}.caddy && "
@@ -232,7 +241,7 @@ def step_verify() -> bool:
     print(f"[verify] 本机 healthz: {health.strip()[:200]}")
     ok &= '"ok": true' in health.replace("'", '"')
 
-    svc = sh(f"systemctl is-active {SVC} {SVC}-scheduler.timer").split()
+    svc = sh(f"systemctl is-active {SVC} {SVC}-scheduler.timer {SVC}-worker").split()
     print(f"[verify] 服务状态: {svc}")
 
     for url, must in [(f"https://{DOMAIN}/api/health", True),
@@ -299,6 +308,8 @@ def main() -> int:
             step_systemd()
         elif s == "schedule":
             step_schedule()
+        elif s == "worker":
+            step_worker()
         elif s == "caddy":
             step_caddy()
         elif s == "firewall":

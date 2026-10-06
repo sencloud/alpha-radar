@@ -1,0 +1,48 @@
+# alpha-radar 全市场 worker（常驻，串行）
+#
+# 安装：
+#   sudo cp deploy/alpharadar-worker.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now alpharadar-worker
+#
+# 职责分工（避免两套机制重复写结果）：
+#   alpharadar-scheduler.timer  -> 采集语料库 + 同步全市场品种/任务队列
+#   alpharadar-worker.service   -> 从任务队列取到期任务，串行回测
+#
+# --minutes 720：每 12 小时自然退出一次，由 systemd 重启，顺便重读配置与品种表。
+
+[Unit]
+Description=alpha-radar full-market backtest worker
+Documentation=https://alpha-radar.infiniti.website/runs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=alpharadar
+Group=alpharadar
+WorkingDirectory=/opt/alpha-radar
+EnvironmentFile=/opt/alpha-radar/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/alpha-radar/.venv/bin/python -m alpharadar.worker --minutes 720 --sync
+Restart=always
+RestartSec=30
+TimeoutStopSec=120
+
+# 后台批处理：降优先级，别和 web / 邻居服务抢 CPU 与磁盘
+Nice=10
+CPUWeight=20
+IOWeight=20
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/alpha-radar/data /opt/alpha-radar/data_cache
+ReadWritePaths=/opt/alpha-radar/reports /opt/alpha-radar/corpus
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=alpharadar-worker
+
+[Install]
+WantedBy=multi-user.target

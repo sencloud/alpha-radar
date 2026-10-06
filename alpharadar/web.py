@@ -345,6 +345,9 @@ def _runs_page(q: dict) -> bytes:
     store.init()
     hv = (store.get_state("harvest") or {}).get("value") or {}
     cy = (store.get_state("last_cycle") or {}).get("value") or {}
+    wk = (store.get_state("worker") or {}).get("value") or {}
+    ins = (store.get_state("instruments") or {}).get("value") or {}
+    ts = store.task_stats()
     ss = store.script_stats()
     rows = store.latest_results(symbol=symbol, strategy=strategy, freq=freq,
                                 market=market)
@@ -355,14 +358,43 @@ def _runs_page(q: dict) -> bytes:
         return f"<div class='card'><div class='k'>{k}</div><div class='v'>{v}</div></div>"
 
     cards = "".join([
+        card("队列总量", f"{ts.get('total', 0):,}"),
+        card("队列已完成", f"{ts.get('ok', 0):,}"),
+        card("待跑", f"{ts.get('due', 0):,}"),
         card("语料库", f"{ss.get('total') or 0}"),
-        card("其中开源", f"{ss.get('open') or 0}"),
-        card("strategy 类型", f"{ss.get('strat') or 0}"),
         card("上次采集新增", f"{hv.get('new', '—')}"),
-        card("上次扫描成功", f"{cy.get('ok', '—')}"),
-        card("上次扫描失败", f"{cy.get('err', '—')}"),
-        card("组合总数", f"{cy.get('cells', '—')}"),
+        card("定时扫描成功", f"{cy.get('ok', '—')}"),
     ])
+
+    total, done = ts.get("total", 0), ts.get("ok", 0)
+    pct = (done / total * 100) if total else 0.0
+    secs = wk.get("seconds") or 0
+    rate = (wk.get("rate_per_min") or 0) / 60.0 or \
+        ((wk.get("ok", 0) + wk.get("err", 0)) / secs if secs else 0)
+    eta = f"{(ts.get('due', 0) / rate / 3600):.1f} 小时" if rate > 0 else "—"
+    run_flag = "运行中" if wk.get("running") else ("已停止" if wk else "未启动")
+    by_freq = " · ".join(f"{k} {v:,}" for k, v in (ts.get("by_freq") or {}).items())
+    by_mkt = " · ".join(f"{k} {v:,}" for k, v in (ts.get("by_market") or {}).items())
+    ins_line = (f"品种 {ins.get('instruments', 0):,} 个"
+                f"（{by_mkt}）" if ins else "尚未同步品种表")
+    queue_html = f"""
+<h2>全市场任务队列</h2>
+<div class="cards">
+  <div class="card"><div class="k">总量</div><div class="v">{total:,}</div></div>
+  <div class="card"><div class="k">已完成</div><div class="v up">{done:,}</div></div>
+  <div class="card"><div class="k">待跑</div><div class="v">{ts.get('due', 0):,}</div></div>
+  <div class="card"><div class="k">失败</div><div class="v down">{ts.get('err', 0):,}</div></div>
+  <div class="card"><div class="k">完成度</div><div class="v">{pct:.1f}%</div></div>
+  <div class="card"><div class="k">预计跑完</div><div class="v">{eta}</div></div>
+</div>
+<p class="note">{ins_line}
+&nbsp;·&nbsp; 按周期：{by_freq or '—'}
+&nbsp;·&nbsp; 上一轮 worker：成功 {wk.get('ok', '—')} / 失败 {wk.get('err', '—')}
+{f"（{run_flag}，{secs}s，{rate * 60:.1f} 任务/分钟）" if secs else f"（{run_flag}）"}</p>
+<p class="note">队列覆盖 <b>全 A 股 + 全期货品种 × 各自可用周期 × 全部策略</b>，
+由常驻 worker 串行执行（速度优先让位于稳定）。成功的任务 {7} 天后自动重跑，
+失败的 6 小时后重试。改范围请编辑 <code>config/universe.json</code> 的 <code>auto</code> 段。</p>
+"""
 
     def opts(values, sel):
         o = ['<option value="">全部</option>']
@@ -434,6 +466,7 @@ def _runs_page(q: dict) -> bytes:
 <div class="sub">调度器在服务器上定时扫描 <code>config/universe.json</code> 里的
 品种 × 周期 × 策略，结果写入 SQLite；这里读的是最新一条记录。</div>
 <div class="cards">{cards}</div>
+{queue_html}
 <p class="note">上次采集：{html.escape(str((store.get_state('harvest') or {}).get('ts') or '—'))}
 &nbsp;·&nbsp; 上次扫描：{html.escape(str((store.get_state('last_cycle') or {}).get('ts') or '—'))}
 &nbsp;·&nbsp; 扫描由 systemd timer 驱动，失败会自动跳过并在运行记录里留痕</p>

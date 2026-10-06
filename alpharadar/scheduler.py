@@ -164,8 +164,13 @@ def run_cycle(cfg: dict | None = None, force: bool = False, limit: int = 0,
                             client, out, with_harvest)
 
 
-def harvest_only(cfg: dict | None = None, out=print) -> dict:
-    """只补采语料库（与定时任务共用同一把锁）。"""
+def harvest_only(cfg: dict | None = None, out=print,
+                 sync_instruments_too: bool = False) -> dict:
+    """只补采语料库（与定时任务共用同一把锁）。
+
+    sync_instruments_too=True 时顺带刷新全市场品种表与任务队列 —— 定时器用
+    这个组合做「采集 + 品种同步」，回测交给常驻 worker，两边职责不重叠。
+    """
     cfg = cfg or load_universe()
     LOCK.parent.mkdir(parents=True, exist_ok=True)
     with open(LOCK, "w") as lk:
@@ -175,6 +180,10 @@ def harvest_only(cfg: dict | None = None, out=print) -> dict:
         run_id = store.start_run("harvest", "manual")
         try:
             res = do_harvest(cfg, run_id, out)
+            if sync_instruments_too:
+                from .instruments import sync as sync_inst
+                out("[sync] 刷新全市场品种与任务队列…")
+                res.update(sync_inst(cfg=cfg, verbose=out))
             store.finish_run(run_id, "ok", n_ok=1, n_err=0)
             return res
         except Exception as exc:
@@ -268,12 +277,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-harvest", action="store_true", help="只回测，不采集")
     ap.add_argument("--harvest-only", action="store_true",
                     help="只采集语料库，不回测（运维/手动补采）")
+    ap.add_argument("--sync-instruments", action="store_true",
+                    help="采集后刷新全市场品种表与任务队列")
     args = ap.parse_args(argv)
 
     store.init()
     cfg = load_universe(Path(args.universe))
     if args.harvest_only:
-        harvest_only(cfg)
+        harvest_only(cfg, sync_instruments_too=args.sync_instruments)
         return 0
     if args.loop:
         while True:

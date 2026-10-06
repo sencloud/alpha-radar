@@ -19,7 +19,7 @@ Group=alpharadar
 WorkingDirectory=/opt/alpha-radar
 EnvironmentFile=/opt/alpha-radar/.env
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/alpha-radar/.venv/bin/python -m alpharadar.scheduler --once
+ExecStart=/opt/alpha-radar/.venv/bin/python -m alpharadar.scheduler --once --harvest-only --sync-instruments
 TimeoutStartSec=5400
 
 # 这是后台批处理：降优先级，别和 web / 邻居服务抢 CPU

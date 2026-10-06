@@ -275,3 +275,66 @@ def test_harvest_channels_are_configurable():
     sig = inspect.signature(harvest)
     assert sig.parameters["channels"].default == ("search", "feed", "forum")
     assert "stats" in sig.parameters
+
+
+# ==================== 全市场任务队列 ====================
+def test_futures_product_parse():
+    """RB2601.SHF -> RB.SHF；不同交易所后缀都要保留。"""
+    from alpharadar.instruments import _product
+
+    assert _product("RB2601.SHF") == "RB.SHF"
+    assert _product("TA1001.ZCE") == "TA.ZCE"
+    assert _product("IF1906.CFX") == "IF.CFX"
+    assert _product("SC2508.INE") == "SC.INE"
+
+
+def test_task_queue_lifecycle(tmp_path):
+    """队列：生成 -> 领取 -> 完成排期；策略周期白名单要参与过滤。"""
+    from alpharadar import store
+
+    db = tmp_path / "t.db"
+    store.init(db)
+    n = store.sync_instruments([
+        {"symbol": "P.DCE", "name": "棕榈油", "market": "futures",
+         "freqs": ["5min", "1d"]},
+        {"symbol": "600519.SH", "name": "贵州茅台", "market": "stocks",
+         "freqs": ["1d"]},
+    ], path=db)
+    assert n == 2
+    # utbot 不限周期；orb 只做日内
+    added, total = store.sync_tasks({"utbot": (), "orb": ("1min", "5min")}, path=db)
+    # P.DCE: 5min×2 + 1d×1 = 3；600519: 1d×1 = 1
+    assert (added, total) == (4, 4)
+    # 幂等
+    assert store.sync_tasks({"utbot": (), "orb": ("1min", "5min")}, path=db)[0] == 0
+
+    due = store.claim_tasks(10, path=db)
+    assert len(due) == 4 and all(d["market"] for d in due)
+    assert not any(d["strategy"] == "orb" and d["freq"] == "1d" for d in due)
+
+    store.finish_task(due[0]["id"], "ok", requeue_days=7, path=db)
+    store.finish_task(due[1]["id"], "error", path=db, err="boom")
+    st = store.task_stats(path=db)
+    assert st["total"] == 4 and st["ok"] == 1 and st["err"] == 1
+    assert st["due"] == 2                     # 成功/失败都排到了未来
+    # 失败的下次到期时间应该在成功之前（6 小时 vs 7 天）
+    rows = {r["symbol"] + r["strategy"] + r["freq"]: r
+            for r in store.claim_tasks(0, path=db)} if False else None
+    with store.connect(db) as con:
+        a = con.execute("SELECT next_due FROM tasks WHERE id=?", (due[0]["id"],)).fetchone()[0]
+        b = con.execute("SELECT next_due FROM tasks WHERE id=?", (due[1]["id"],)).fetchone()[0]
+    assert b < a
+
+
+def test_task_stats_shape(tmp_path):
+    from alpharadar import store
+
+    db = tmp_path / "t.db"
+    store.init(db)
+    store.sync_instruments([{"symbol": "P.DCE", "name": "p", "market": "futures",
+                             "freqs": ["1d"]}], path=db)
+    store.sync_tasks({"utbot": (), "orbtest": ()}, path=db)
+    st = store.task_stats(path=db)
+    assert st["total"] == 2 and st["due"] == 2
+    assert st["by_market"] == {"futures": 2}
+    assert st["by_freq"] == {"1d": 2}

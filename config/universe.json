@@ -22,5 +22,29 @@
     "_说明": "A 股分钟线需要 stk_mins 权限，默认只跑日线（权限门槛最低）",
     "freqs": ["1d"],
     "symbols": ["600519.SH", "000001.SZ", "510300.SH", "000858.SZ", "601318.SH"]
+  },
+
+  "auto": {
+    "_说明": "全市场任务队列配置。worker 按 instruments 表 × strategies × freqs 生成任务，串行执行。",
+    "refresh_days": 7,
+    "stocks": {
+      "enabled": true,
+      "_说明": "全 A 股跑日线；分钟级按流动性取前 minute_top_n 只（全市场 1 分钟约 78GB，磁盘放不下）",
+      "freqs": ["1d", "1min", "5min", "15min", "30min", "60min"],
+      "minute_top_n": 300,
+      "lookback_days": 20,
+      "exclude_markets": [],
+      "limit": 0,
+      "start_daily": "20220101",
+      "start_minute": "20240101"
+    },
+    "futures": {
+      "enabled": true,
+      "_说明": "全期货品种，全部周期（约 2GB 分钟数据，可承受）",
+      "freqs": ["1min", "5min", "15min", "30min", "60min", "1d"],
+      "exchanges": ["SHFE", "DCE", "CZCE", "CFFEX", "INE", "GFEX"],
+      "start_daily": "20220101",
+      "start_minute": "20220101"
+    }
   }
 }
