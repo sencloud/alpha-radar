@@ -133,3 +133,53 @@ def test_instrument_defaults():
     assert resolve("600519.SH").t_plus_1 is True
     assert Instrument("X.SHF", "x", "futures", 10, 1.0).t_plus_1 is False
     assert get("utbot").key == "utbot"
+
+
+# ==================== 结果库 / 调度器 ====================
+def test_store_roundtrip(tmp_path):
+    from alpharadar import store
+
+    db = tmp_path / "t.db"
+    store.init(db)
+    rid = store.start_run("cycle", "test", path=db)
+    store.finish_run(rid, "ok", n_ok=2, n_err=0, path=db)
+
+    base = {"run_id": rid, "ts": "2026-10-06T12:00:00", "symbol": "P.DCE",
+            "name": "棕榈油", "market": "futures", "strategy": "utbot",
+            "freq": "5min", "start": "20220101", "end": "20261006",
+            "trades": 100, "win_rate": 0.42, "pf": 1.05, "avg_points": 1.06,
+            "total_pnl": 11227.0, "max_dd": -25076.0, "ret_dd": 0.45,
+            "pos_years": 2, "years": 5, "status": "ok", "error": "", "report": "r.html"}
+    store.add_result(base, path=db)
+    store.add_result({**base, "ts": "2026-10-07T12:00:00", "pf": 1.20}, path=db)
+
+    rows = store.latest_results(path=db)
+    assert len(rows) == 1                      # 同 (品种,策略,周期) 只留最新
+    assert rows[0]["pf"] == 1.20
+    assert store.symbols_in_results(path=db)[0]["symbol"] == "P.DCE"
+    assert len(store.history("P.DCE", "utbot", "5min", path=db)) == 2
+    assert store.last_ok("P.DCE", "utbot", "5min", path=db)["status"] == "ok"
+    assert store.recent_runs(5, path=db)[0]["n_ok"] == 2
+
+
+def test_store_state_roundtrip(tmp_path):
+    from alpharadar import store
+
+    db = tmp_path / "t.db"
+    store.init(db)
+    store.set_state("harvest", {"total": 319, "new": 12}, path=db)
+    got = store.get_state("harvest", path=db)
+    assert got["value"]["new"] == 12 and got["ts"]
+    assert store.get_state("missing", {"x": 1}, path=db) == {"x": 1}
+
+
+def test_scheduler_cells_and_universe():
+    from alpharadar import scheduler
+
+    cfg = {"start": "20240101", "max_age_days": 7,
+           "strategies": ["utbot", "orb"],
+           "futures": {"freqs": ["5min", "1d"], "symbols": ["P.DCE", "Y.DCE"]},
+           "stocks": {"freqs": ["1d"], "symbols": ["600519.SH"]}}
+    cells = scheduler.build_cells(cfg)
+    assert len(cells) == (2 * 2 + 1) * 2      # (品种×周期) × 策略
+    assert {c["market"] for c in cells} == {"futures", "stocks"}

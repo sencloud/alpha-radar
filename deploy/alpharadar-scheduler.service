@@ -1,0 +1,39 @@
+# alpha-radar 定时扫描（systemd oneshot，由 timer 触发）
+#
+# 安装：
+#   sudo cp deploy/alpharadar-scheduler.{service,timer} /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now alpharadar-scheduler.timer
+#
+# 只允许存在一份：脚本内部用 flock 防重入，timer 与手动触发不会叠跑。
+
+[Unit]
+Description=alpha-radar scheduled scan (harvest + backtest)
+Documentation=https://alpha-radar.infiniti.website/runs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=alpharadar
+Group=alpharadar
+WorkingDirectory=/opt/alpha-radar
+EnvironmentFile=/opt/alpha-radar/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/alpha-radar/.venv/bin/python -m alpharadar.scheduler --once
+TimeoutStartSec=5400
+
+# 这是后台批处理：降优先级，别和 web / 邻居服务抢 CPU
+Nice=10
+CPUWeight=20
+IOWeight=20
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/alpha-radar/data /opt/alpha-radar/data_cache
+ReadWritePaths=/opt/alpha-radar/reports /opt/alpha-radar/corpus
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=alpharadar-sched

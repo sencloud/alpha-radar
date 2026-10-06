@@ -1,0 +1,24 @@
+{
+  "_说明": "调度器的扫描清单。改这里即可增减品种/周期/策略，不需要改代码。",
+  "start": "20220101",
+  "max_age_days": 7,
+  "harvest_max_fetch": 300,
+  "strategies": [
+    "utbot",
+    "supertrend",
+    "chandelier",
+    "orb",
+    "vreversal",
+    "false_breakout",
+    "ema_cross"
+  ],
+  "futures": {
+    "freqs": ["5min", "1d"],
+    "symbols": ["P.DCE", "Y.DCE", "OI.ZCE", "M.DCE", "C.DCE", "RB.SHF", "AG.SHF"]
+  },
+  "stocks": {
+    "_说明": "A 股分钟线需要 stk_mins 权限，默认只跑日线（权限门槛最低）",
+    "freqs": ["1d"],
+    "symbols": ["600519.SH", "000001.SZ", "510300.SH", "000858.SZ", "601318.SH"]
+  }
+}

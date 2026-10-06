@@ -36,10 +36,15 @@ DOMAIN = "alpha-radar.infiniti.website"
 COHOSTS = ("https://lastndays.com/", "https://infiniti.website/")
 BACKUP = "/var/backups/alpha-radar"
 
-EXCLUDE = {".git", "data_cache", "reports", "corpus", "dist", ".venv",
+# 注意：data/（结果库）、.env、*.db、*.lock 必须排除。
+# 踩过的坑：早期版本漏了 data/，把本地测试数据库打包上传，
+# 服务端解包后 DB 属主变成 root，且混进了本地测试记录。
+EXCLUDE = {".git", "data", "data_cache", "reports", "corpus", "dist", ".venv",
            "__pycache__", ".pytest_cache", ".idea", ".vscode"}
+EXCLUDE_FILES = {".env"}
+EXCLUDE_SUFFIX = (".db", ".db-wal", ".db-shm", ".lock", ".pyc")
 
-ALL_STEPS = ("pack", "upload", "user", "venv", "env", "systemd",
+ALL_STEPS = ("pack", "upload", "user", "venv", "env", "systemd", "schedule",
              "caddy", "firewall", "verify")
 
 
@@ -74,6 +79,8 @@ def step_pack() -> Path:
             rel = p.relative_to(ROOT)
             if any(part in EXCLUDE for part in rel.parts):
                 continue
+            if p.name in EXCLUDE_FILES or p.name.endswith(EXCLUDE_SUFFIX):
+                continue
             if p.is_file():
                 t.add(p, arcname=str(rel))
     print(f"[pack] {tar}  {tar.stat().st_size / 1024:.0f} KB")
@@ -94,7 +101,7 @@ def step_upload(tar: Path) -> None:
 def step_user() -> None:
     sh(f"id -u {USER} >/dev/null 2>&1 || useradd --system --no-create-home "
        f"--shell /usr/sbin/nologin {USER}; "
-       f"mkdir -p {APP}/data_cache {APP}/reports; "
+       f"mkdir -p {APP}/data {APP}/data_cache {APP}/reports {APP}/corpus; "
        f"chown -R {USER}:{USER} {APP}; chmod 755 {APP}")
     print(f"[user] {USER} 就绪，目录属主已设置")
 
@@ -127,6 +134,17 @@ def step_systemd() -> None:
        f"systemctl daemon-reload && systemctl enable {SVC} >/dev/null 2>&1; "
        f"systemctl restart {SVC} && sleep 3 && systemctl is-active {SVC}")
     print(f"[systemd] {SVC}.service 已重启")
+
+
+def step_schedule() -> None:
+    """安装定时扫描：oneshot service + timer（每 6 小时）。"""
+    sh(f"cp {APP}/deploy/{SVC}-scheduler.service /etc/systemd/system/ && "
+       f"cp {APP}/deploy/{SVC}-scheduler.timer /etc/systemd/system/ && "
+       f"systemctl daemon-reload && "
+       f"systemctl enable --now {SVC}-scheduler.timer >/dev/null 2>&1; "
+       f"systemctl is-active {SVC}-scheduler.timer; "
+       f"systemctl list-timers {SVC}-scheduler.timer --no-pager | head -2")
+    print("[schedule] 定时扫描已启用（每 6 小时）")
 
 
 def step_caddy() -> None:
@@ -166,6 +184,8 @@ def step_verify() -> bool:
 
     svc = sh(f"systemctl is-active {SVC}")
     print(f"[verify] {SVC}: {svc.strip()}")
+    tmr = sh(f"systemctl is-active {SVC}-scheduler.timer")
+    print(f"[verify] {SVC}-scheduler.timer: {tmr.strip()}")
 
     for url, must in [(f"https://{DOMAIN}/api/health", True),
                       (f"https://{DOMAIN}/", True)] + [(c, False) for c in COHOSTS]:
@@ -214,6 +234,8 @@ def main() -> int:
             step_env()
         elif s == "systemd":
             step_systemd()
+        elif s == "schedule":
+            step_schedule()
         elif s == "caddy":
             step_caddy()
         elif s == "firewall":

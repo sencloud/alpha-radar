@@ -26,7 +26,7 @@ python deploy\deploy.py --steps upload,systemd,verify
 
 步骤（全部幂等，可单独重跑）：
 
-`pack → upload → user → venv → env → systemd → caddy → firewall → verify`
+`pack → upload → user → venv → env → systemd → schedule → caddy → firewall → verify`
 
 | 步骤 | 做什么 |
 |---|---|
@@ -36,9 +36,45 @@ python deploy\deploy.py --steps upload,systemd,verify
 | venv | 建虚拟环境并 `pip install -e .` |
 | env | 上传 `.env`（含 TUSHARE_TOKEN），权限 600 |
 | systemd | 安装并重启 `alpharadar.service` |
+| schedule | 安装 `alpharadar-scheduler.{service,timer}`（每 6 小时扫描） |
 | caddy | 安装 `conf.d/alpharadar.caddy`，校验后 reload |
 | firewall | 确认本机 80/443 放行（云安全组需另配） |
 | verify | 本机 /healthz + 域名 HTTPS + 两个邻居站点 |
+
+## 定时扫描（无人值守）
+
+`alpharadar-scheduler.timer` 每 6 小时触发一次 `alpharadar-scheduler.service`：
+
+1. **增量采集** TradingView 开源脚本（已下过的不重复请求）
+2. **扫描回测** `config/universe.json` 里的 品种 × 周期 × 策略
+3. 结果写进 `/opt/alpha-radar/data/alpharadar.db`（SQLite，WAL）
+
+两个关键设计：
+
+- **增量 + 轮转**：`max_age_days`（默认 7 天）内的成功记录直接跳过；
+  需要重跑的按「上次成功时间」从旧到新排序，一轮跑不完（`--limit`）也不会饿死后面的组合。
+- **只跑一份**：脚本内部 `flock` 防重入，timer 与「立即扫描」按钮不会叠跑。
+
+改扫描范围只需编辑 `config/universe.json`（增减品种/周期/策略），不用改代码。
+A 股分钟线需要 `stk_mins` 权限，默认只跑日线。
+
+```bash
+# 手动跑一轮（--force 忽略新鲜度，--limit 限量）
+sudo -u alpharadar /opt/alpha-radar/.venv/bin/python -m alpharadar.scheduler \
+     --once --limit 10
+
+# 看下次触发时间 / 最近的运行
+systemctl list-timers alpharadar-scheduler.timer
+journalctl -u alpharadar-scheduler -n 50 --no-pager
+```
+
+留出给邻居的资源：`Nice=10`、`CPUWeight=20`、`IOWeight=20`，
+不与 web / lastdays / infiniti 抢 CPU。
+
+## 看板
+
+<https://alpha-radar.infiniti.website/runs> —— 调度状态、语料库统计、品种列表、
+结果榜（按 PF 排序，可按品种/策略/周期/市场筛选）、运行记录，以及「立即扫描一轮」按钮。
 
 ## 首次部署前的两件事
 

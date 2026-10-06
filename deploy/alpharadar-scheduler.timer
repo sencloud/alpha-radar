@@ -1,0 +1,16 @@
+# 每 6 小时跑一轮扫描。Persistent=true 表示错过的轮次会在开机后补跑一次。
+#
+# 改频率：sudo systemctl edit alpharadar-scheduler.timer
+# 看下次触发：systemctl list-timers alpharadar-scheduler.timer
+
+[Unit]
+Description=alpha-radar scheduler timer (every 6h)
+
+[Timer]
+OnCalendar=*-*-* 00,06,12,18:17:00
+RandomizedDelaySec=600
+Persistent=true
+Unit=alpharadar-scheduler.service
+
+[Install]
+WantedBy=timers.target

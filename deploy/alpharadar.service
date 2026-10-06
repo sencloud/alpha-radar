@@ -31,7 +31,8 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
-ReadWritePaths=/opt/alpha-radar/data_cache /opt/alpha-radar/reports
+ReadWritePaths=/opt/alpha-radar/data /opt/alpha-radar/data_cache
+ReadWritePaths=/opt/alpha-radar/reports /opt/alpha-radar/corpus
 
 StandardOutput=journal
 StandardError=journal

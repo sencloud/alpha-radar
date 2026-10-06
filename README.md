@@ -9,6 +9,8 @@
 
 **在线演示**：<https://alpha-radar.infiniti.website> ——
 选品种 / 策略 / 周期，直接跑一次含成本回测，看 HTML 报告。
+**实时看板**：<https://alpha-radar.infiniti.website/runs> ——
+服务器上每 6 小时自动采集 + 扫描全品种，这里按 PF 排序看结果、按品种/策略筛选、查运行历史。
 
 ## 它长什么样
 
@@ -67,6 +69,11 @@ alpharadar matrix --symbols P.DCE,Y.DCE,M.DCE \
 商业场景请自行确认许可或改用 MIT/MPL 来源。
 
 ## 两只手：确定性内核 + agent 大脑
+
+**无人值守**：`alpharadar-scheduler.timer` 每 6 小时跑一轮
+「增量采集 TradingView 开源脚本 → 扫描 `config/universe.json` 里的品种×周期×策略 → 写 SQLite」。
+某个组合在 `max_age_days` 内成功过就跳过；需要重跑的按上次成功时间从旧到新排队，
+一轮跑不完也不会饿死后面的组合。
 
 **内核**（`alpharadar/`）是可独立运行的 Python 包：数据、撮合、成本、指标、报告。
 不依赖任何 agent，`pip install` 后即可用。

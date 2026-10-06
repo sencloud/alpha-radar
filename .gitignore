@@ -11,6 +11,7 @@ dist/
 
 # 运行产物
 data_cache/
+data/
 corpus/
 reports/
 *.log

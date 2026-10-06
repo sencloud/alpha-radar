@@ -13,11 +13,14 @@ def _p(env: str, default: str) -> Path:
 
 
 CACHE_DIR = _p("ALPHARADAR_CACHE", "data_cache")      # 行情缓存
+DATA_DIR = _p("ALPHARADAR_DATA", "data")              # 结果数据库
 CORPUS_DIR = _p("ALPHARADAR_CORPUS", "corpus")        # TradingView 语料库
 REPORT_DIR = _p("ALPHARADAR_REPORTS", "reports")      # 回测报告
 
-for _d in (CACHE_DIR, CORPUS_DIR, REPORT_DIR):
+for _d in (CACHE_DIR, DATA_DIR, CORPUS_DIR, REPORT_DIR):
     _d.mkdir(parents=True, exist_ok=True)
+
+DB_PATH = DATA_DIR / "alpharadar.db"
 
 
 def load_env(path: Path | None = None) -> None:

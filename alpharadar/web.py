@@ -34,6 +34,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import __version__, config
 from .pipeline import catalog, run_one, save_result
+from . import store
 from .universe import PRESETS
 
 PORT = int(os.environ.get("ALPHARADAR_PORT", "8901"))
@@ -75,15 +76,29 @@ padding:9px 20px;font-size:14px;font-weight:600;cursor:pointer}
 button:disabled{opacity:.5;cursor:not-allowed}
 .note{color:var(--mut);font-size:13px}
 .warn{border-left:3px solid var(--acc);padding-left:12px;color:var(--mut);font-size:13px}
+.nav{display:flex;gap:18px;margin-bottom:26px;padding-bottom:12px;
+border-bottom:1px solid var(--line);font-size:14px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;
+margin:10px 0 6px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+padding:11px 14px}
+.card .k{color:var(--mut);font-size:12px}
+.card .v{font-size:19px;font-weight:600;margin-top:3px}
+.up{color:var(--up)}.down{color:var(--down)}
+form.filters{background:transparent;border:0;padding:0;margin:10px 0}
 """
 
 
 def _page(title: str, body: str, refresh: str = "") -> bytes:
     meta = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
+    nav = ('<div class="nav"><a href="/">首页</a>'
+           '<a href="/runs">状态与历史</a>'
+           '<a href="/api/health">health</a>'
+           '<a href="https://github.com/sencloud/alpha-radar">GitHub</a></div>')
     return f"""<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">{meta}
 <title>{html.escape(title)}</title><style>{CSS}</style></head>
-<body><div class="wrap">{body}</div></body></html>""".encode("utf-8")
+<body><div class="wrap">{nav}{body}</div></body></html>""".encode("utf-8")
 
 
 def _index() -> bytes:
@@ -138,6 +153,7 @@ github.com/sencloud/alpha-radar</a>
 
 
 def _job_page(job: dict) -> bytes:
+    """任务进度页。"""
     if job["state"] == "done":
         return _page("完成", f"""<h1>回测完成</h1>
 <p><a href="/report/{html.escape(job['report'])}">查看报告 →</a></p>
@@ -154,6 +170,147 @@ def _job_page(job: dict) -> bytes:
 
 
 # ==================== 任务 ====================
+def _runs_page(q: dict) -> bytes:
+    """状态与历史：调度状态、语料库、品种列表、结果榜、运行记录。"""
+    symbol = (q.get("symbol") or [""])[0]
+    strategy = (q.get("strategy") or [""])[0]
+    freq = (q.get("freq") or [""])[0]
+    market = (q.get("market") or [""])[0]
+
+    store.init()
+    hv = (store.get_state("harvest") or {}).get("value") or {}
+    cy = (store.get_state("last_cycle") or {}).get("value") or {}
+    ss = store.script_stats()
+    rows = store.latest_results(symbol=symbol, strategy=strategy, freq=freq,
+                                market=market)
+    syms = store.symbols_in_results()
+    runs = store.recent_runs(20)
+
+    def card(k, v):
+        return f"<div class='card'><div class='k'>{k}</div><div class='v'>{v}</div></div>"
+
+    cards = "".join([
+        card("语料库", f"{ss.get('total') or 0}"),
+        card("其中开源", f"{ss.get('open') or 0}"),
+        card("strategy 类型", f"{ss.get('strat') or 0}"),
+        card("上次采集新增", f"{hv.get('new', '—')}"),
+        card("上次扫描成功", f"{cy.get('ok', '—')}"),
+        card("上次扫描失败", f"{cy.get('err', '—')}"),
+        card("组合总数", f"{cy.get('cells', '—')}"),
+    ])
+
+    def opts(values, sel):
+        o = ['<option value="">全部</option>']
+        for v in values:
+            o.append(f'<option value="{html.escape(str(v))}"'
+                     f'{" selected" if str(v) == sel else ""}>{html.escape(str(v))}</option>')
+        return "".join(o)
+
+    all_syms = sorted({r["symbol"] for r in rows}) or sorted(
+        {r["symbol"] for r in syms})
+    all_strat = sorted({r["strategy"] for r in rows})
+    all_freq = sorted({r["freq"] for r in rows})
+
+    def cell(v, fmt="{}", cls_by_sign=False):
+        if v is None:
+            return "<td>—</td>"
+        s = fmt.format(v)
+        if cls_by_sign and isinstance(v, (int, float)) and v != 0:
+            return f"<td class='{'up' if v > 0 else 'down'}'>{s}</td>"
+        return f"<td>{s}</td>"
+
+    body_rows = []
+    name_of = {s.key: s.name for s in catalog()}
+    for r in rows:
+        rep = (f"<a href='/report/{html.escape(r['report'])}'>报告</a>"
+               if r.get("report") else "—")
+        sname = name_of.get(str(r["strategy"]), str(r["strategy"]))
+        body_rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(r['symbol']))}</td>"
+            f"<td>{html.escape(str(r.get('name') or ''))}</td>"
+            f"<td>{html.escape(str(r.get('market') or ''))}</td>"
+            f"<td>{html.escape(sname)}</td>"
+            f"<td>{html.escape(str(r['freq']))}</td>"
+            + cell(r["trades"], "{:,}")
+            + cell(None if r["win_rate"] is None else r["win_rate"] * 100, "{:.1f}%")
+            + cell(r["pf"], "{:.2f}")
+            + cell(r["avg_points"], "{:+.2f}", True)
+            + cell(r["total_pnl"], "{:+,.0f}", True)
+            + cell(r["max_dd"], "{:,.0f}")
+            + cell(r["ret_dd"], "{:.2f}", True)
+            + f"<td>{r.get('pos_years', '—')}/{r.get('years', '—')}</td>"
+            f"<td class='note'>{html.escape(str(r.get('ts', ''))[5:16])}</td>"
+            f"<td>{rep}</td></tr>")
+    if not body_rows:
+        body_rows.append("<tr><td colspan='14' class='note'>还没有结果 —— "
+                         "调度器跑完第一轮后这里会出现数据。</td></tr>")
+
+    sym_rows = "".join(
+        f"<tr><td><a href='/runs?symbol={html.escape(s['symbol'])}'>"
+        f"{html.escape(s['symbol'])}</a></td>"
+        f"<td>{html.escape(str(s.get('name') or ''))}</td>"
+        f"<td>{html.escape(str(s.get('market') or ''))}</td>"
+        f"<td>{s['n']}</td>"
+        f"<td class='note'>{html.escape(str(s.get('last_ts') or '')[5:16])}</td></tr>"
+        for s in syms) or "<tr><td colspan='5' class='note'>暂无</td></tr>"
+
+    run_rows = "".join(
+        f"<tr><td>{r['id']}</td><td>{html.escape(str(r['kind']))}</td>"
+        f"<td>{html.escape(str(r.get('started_at') or '')[5:19])}</td>"
+        f"<td>{html.escape(str(r.get('finished_at') or '')[5:19] or '—')}</td>"
+        f"<td>{html.escape(str(r.get('status') or ''))}</td>"
+        f"<td>{r.get('n_ok', 0)}</td><td>{r.get('n_err', 0)}</td>"
+        f"<td>{r.get('n_skip', 0)}</td></tr>" for r in runs
+    ) or "<tr><td colspan='8' class='note'>暂无</td></tr>"
+
+    body = f"""
+<h1>状态与历史</h1>
+<div class="sub">调度器在服务器上定时扫描 <code>config/universe.json</code> 里的
+品种 × 周期 × 策略，结果写入 SQLite；这里读的是最新一条记录。</div>
+<div class="cards">{cards}</div>
+<p class="note">上次采集：{html.escape(str((store.get_state('harvest') or {}).get('ts') or '—'))}
+&nbsp;·&nbsp; 上次扫描：{html.escape(str((store.get_state('last_cycle') or {}).get('ts') or '—'))}
+&nbsp;·&nbsp; 扫描由 systemd timer 驱动，失败会自动跳过并在运行记录里留痕</p>
+<form method="post" action="/runs/trigger">
+  <button type="submit">立即扫描一轮（限量）</button>
+  <span class="note">手动触发只跑最旧的几个组合，不会打断定时任务</span>
+</form>
+
+<form class="filters" method="get" action="/runs">
+  <label>品种</label><select name="symbol">{opts(all_syms, symbol)}</select>
+  <label>策略</label><select name="strategy">{opts(all_strat, strategy)}</select>
+  <label>周期</label><select name="freq">{opts(all_freq, freq)}</select>
+  <label>市场</label><select name="market">
+    <option value="">全部</option>
+    <option value="futures"{" selected" if market == "futures" else ""}>期货</option>
+    <option value="stocks"{" selected" if market == "stocks" else ""}>A股</option>
+  </select>
+  <button type="submit">筛选</button>
+</form>
+
+<h2>结果榜（按 PF 降序）</h2>
+<table><thead><tr><th>品种</th><th>名称</th><th>市场</th><th>策略</th><th>周期</th>
+<th>笔数</th><th>胜率</th><th>PF</th><th>均点</th><th>合计</th><th>最大回撤</th>
+<th>收益回撤比</th><th>正年</th><th>时间</th><th></th></tr></thead>
+<tbody>{''.join(body_rows)}</tbody></table>
+
+<h2>品种列表</h2>
+<table><thead><tr><th>品种</th><th>名称</th><th>市场</th><th>记录数</th>
+<th>最近</th></tr></thead><tbody>{sym_rows}</tbody></table>
+
+<h2>运行记录</h2>
+<table><thead><tr><th>#</th><th>类型</th><th>开始</th><th>结束</th><th>状态</th>
+<th>成功</th><th>失败</th><th>跳过</th></tr></thead><tbody>{run_rows}</tbody></table>
+
+<p class="note">提醒：PF &gt; 1 不等于可交易。请同时看<b>笔数</b>（样本量）、
+<b>正年数</b>（是否只靠某一年）与<b>收益回撤比</b>（是否值得做）。
+详见 <a href="https://github.com/sencloud/alpha-radar/blob/main/docs/pitfalls.md">
+反过拟合守则</a>。</p>
+"""
+    return _page("状态与历史 · alpha-radar", body)
+
+
 def _run_job(job_id: str, symbol: str, strategy: str, freq: str, start: str) -> None:
     job = _jobs[job_id]
     job["state"] = "running"
@@ -185,6 +342,33 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):                 # 交给 journald
         print(f"{self.address_string()} {fmt % args}", flush=True)
 
+    def _trigger_cycle(self) -> None:
+        """手动触发一轮扫描（限量），后台执行，立即返回。"""
+        limit = int(os.environ.get("ALPHARADAR_TRIGGER_LIMIT", "3"))
+        try:
+            from . import scheduler
+        except Exception as exc:                       # 依赖缺失时不拖垮站点
+            return self._send(500, _page("错误", f"<h1>调度器不可用</h1>"
+                                         f"<pre class='note'>{html.escape(str(exc))}</pre>"))
+        if any(j["state"] == "running" for j in _jobs.values()):
+            return self._send(429, _page("忙", "<h1>已有任务在跑</h1>"
+                                         "<p><a href='/runs'>← 返回</a></p>"))
+        jid = uuid.uuid4().hex[:12]
+        _jobs[jid] = {"state": "running", "started": time.time(),
+                      "label": f"手动扫描（最多 {limit} 个组合）"}
+
+        def worker():
+            try:
+                scheduler.store.init()
+                scheduler.run_cycle(scheduler.load_universe(), limit=limit,
+                                    out=lambda *a: print(*a, flush=True))
+                _jobs[jid].update(state="done", report="", summary="扫描完成")
+            except Exception as exc:
+                _jobs[jid].update(state="error", error=f"{type(exc).__name__}: {exc}")
+
+        threading.Thread(target=worker, daemon=True).start()
+        self._redirect(f"/job/{jid}")
+
     def _send(self, code: int, body: bytes, ctype="text/html; charset=utf-8") -> None:
         self.send_response(code)
         self.send_header("Content-Type", ctype)
@@ -215,6 +399,12 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/strategies":
             return self._json([{"key": s.key, "name": s.name, "source": s.source,
                                 "license": s.license} for s in catalog()])
+        if p == "/runs":
+            try:
+                return self._send(200, _runs_page(parse_qs(u.query)))
+            except Exception as exc:
+                return self._send(500, _page("错误", f"<h1>读取结果库失败</h1>"
+                                             f"<pre class='note'>{html.escape(str(exc))}</pre>"))
         if p == "/cover.png":
             f = Path(__file__).resolve().parents[1] / "promo" / "zhihu-cover.png"
             if f.exists():
@@ -235,7 +425,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:                         # noqa: N802
         global _last_run
-        if urlparse(self.path).path != "/run":
+        p = urlparse(self.path).path
+        if p == "/runs/trigger":
+            return self._trigger_cycle()
+        if p != "/run":
             return self._send(404, b"not found")
         n = int(self.headers.get("Content-Length", 0))
         form = parse_qs(self.rfile.read(n).decode("utf-8", "replace"))
