@@ -183,3 +183,46 @@ def test_scheduler_cells_and_universe():
     cells = scheduler.build_cells(cfg)
     assert len(cells) == (2 * 2 + 1) * 2      # (品种×周期) × 策略
     assert {c["market"] for c in cells} == {"futures", "stocks"}
+
+
+def _fake_scripts(n=5):
+    from alpharadar.harvest import Script
+    return [Script(id=f"PUB;hash{i:03d}", slug=f"slug{i}", title=f"Strategy {i}",
+                   author="alice" if i % 2 else "bob", agree=100 - i,
+                   kind="study" if i % 2 else "strategy", access="open_no_auth",
+                   lines=10 * i, file=f"slug{i}_Strategy_{i}.pine")
+            for i in range(1, n + 1)]
+
+
+def test_script_listing_and_lookup(tmp_path):
+    from alpharadar import store
+
+    db = tmp_path / "t.db"
+    store.init(db)
+    total, new = store.upsert_scripts(_fake_scripts(5), path=db)
+    assert (total, new) == (5, 5)
+    assert store.upsert_scripts(_fake_scripts(5), path=db)[1] == 0   # 幂等
+
+    rows, cnt = store.list_scripts(path=db)
+    assert cnt == 5 and rows[0]["agree"] == 99                      # 默认按点赞
+    rows, cnt = store.list_scripts(kind="strategy", path=db)
+    assert cnt == 2 and all(r["kind"] == "strategy" for r in rows)
+    rows, cnt = store.list_scripts(q="alice", path=db)
+    assert cnt == 3
+    page2, _ = store.list_scripts(limit=2, offset=2, path=db)
+    assert len(page2) == 2
+    assert store.get_script("hash003", path=db)["title"] == "Strategy 3"   # 按哈希查
+    assert store.get_script("PUB;hash003", path=db)["title"] == "Strategy 3"
+    assert store.get_script("nope", path=db) is None
+    assert store.script_kinds(path=db) == ["study", "strategy"]
+
+
+def test_pine_highlight_escapes_html():
+    """语料库内容是不可信输入：渲染源码时必须转义，不能原样注入 HTML。"""
+    from alpharadar.web import _highlight_pine
+
+    out = _highlight_pine('<script>alert(1)</script>\n// comment\nta.sma(close, 20)')
+    assert "<script>" not in out
+    assert "&lt;script&gt;" in out
+    assert "c-com" in out and "c-ns" in out
+    assert out.count('class="ln"') == 3          # 行号包裹

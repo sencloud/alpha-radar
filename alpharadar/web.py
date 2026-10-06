@@ -86,12 +86,25 @@ padding:11px 14px}
 .card .v{font-size:19px;font-weight:600;margin-top:3px}
 .up{color:var(--up)}.down{color:var(--down)}
 form.filters{background:transparent;border:0;padding:0;margin:10px 0}
+pre.code{counter-reset:line;background:#0b0d11;border:1px solid var(--line);
+border-radius:8px;padding:12px 0;overflow:auto;max-height:72vh;margin:8px 0 20px;
+font:12.5px/1.6 Consolas,'Cascadia Mono',Menlo,monospace;tab-size:4}
+pre.code .ln{display:block;counter-increment:line;padding-left:58px;
+position:relative;white-space:pre;color:#c9d1d9}
+pre.code .ln::before{content:counter(line);position:absolute;left:0;width:44px;
+text-align:right;color:#4a5160;padding-right:10px;user-select:none}
+.c-com{color:#6b7a90;font-style:italic}
+.c-str{color:#7ec699}
+.c-num{color:#f0b429}
+.c-kw{color:#c792ea}
+.c-ns{color:#4ea3ff}
 """
 
 
 def _page(title: str, body: str, refresh: str = "") -> bytes:
     meta = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
     nav = ('<div class="nav"><a href="/">首页</a>'
+           '<a href="/scripts">策略库</a>'
            '<a href="/runs">状态与历史</a>'
            '<a href="/api/health">health</a>'
            '<a href="https://github.com/sencloud/alpha-radar">GitHub</a></div>')
@@ -155,10 +168,12 @@ github.com/sencloud/alpha-radar</a>
 def _job_page(job: dict) -> bytes:
     """任务进度页。"""
     if job["state"] == "done":
-        return _page("完成", f"""<h1>回测完成</h1>
-<p><a href="/report/{html.escape(job['report'])}">查看报告 →</a></p>
-<p class="note">{html.escape(job.get('summary', ''))}</p>
-<p><a href="/">← 返回首页</a></p>""")
+        link = (f"<p><a href='/report/{html.escape(job['report'])}'>查看报告 →</a></p>"
+                if job.get("report") else "")
+        back = ("<p><a href='/scripts'>← 返回策略库</a></p>" if not job.get("report")
+                else "<p><a href='/'>← 返回首页</a></p>")
+        return _page("完成", f"""<h1>完成</h1>{link}
+<p class="note">{html.escape(job.get('summary', ''))}</p>{back}""")
     if job["state"] == "error":
         return _page("失败", f"""<h1>回测失败</h1>
 <pre class="note">{html.escape(job.get('error', ''))}</pre>
@@ -167,6 +182,147 @@ def _job_page(job: dict) -> bytes:
 <p class="note">{html.escape(job['label'])}</p>
 <p class="note">首次拉取数据较慢（期货 1 分钟线可能要数分钟），请稍候。</p>
 <p><a href="/">← 返回首页</a></p>""", refresh="4")
+
+
+# ==================== 策略语料库 ====================
+# Pine 语法着色：先分词再逐段转义，避免转义后再正则匹配到实体
+_PINE_TOKEN = re.compile(
+    r'(?P<comment>//[^\n]*)'
+    r'|(?P<string>"(?:[^"\\]|\\.)*")'
+    r'|(?P<number>\b\d+(?:\.\d+)?\b)'
+    r'|(?P<kw>\b(?:if|else|for|to|by|while|var|varip|float|int|bool|string|'
+    r'color|true|false|na|and|or|not|import|export|type|method|switch|break|'
+    r'continue|return|series|simple|const)\b)'
+    r'|(?P<ns>\b(?:ta|math|str|array|matrix|map|request|input|plot|plotshape|'
+    r'plotchar|plotcandle|hline|fill|label|line|box|table|strategy|indicator|'
+    r'study|alertcondition|barstate|syminfo|timeframe|color|dayofweek|hour)\b)(?=\.)'
+    r'|(?P<fn>\b(?:plot|plotshape|plotchar|plotcandle|hline|fill|label|line|box|'
+    r'table|strategy|indicator|study|input|alertcondition|alert|nz|na)\b)(?=\()'
+)
+_PINE_CLASS = {"comment": "c-com", "string": "c-str", "number": "c-num",
+               "kw": "c-kw", "ns": "c-ns", "fn": "c-ns"}
+
+
+def _highlight_pine(src: str) -> str:
+    parts, pos = [], 0
+    for m in _PINE_TOKEN.finditer(src):
+        parts.append(html.escape(src[pos:m.start()]))
+        cls = _PINE_CLASS.get(m.lastgroup, "")
+        parts.append(f'<span class="{cls}">{html.escape(m.group())}</span>')
+        pos = m.end()
+    parts.append(html.escape(src[pos:]))
+    body = "".join(parts)
+    lines = body.split("\n")
+    return "\n".join(f'<span class="ln">{ln or " "}</span>' for ln in lines)
+
+
+def _script_url(rec: dict) -> str:
+    slug = rec.get("slug") or ""
+    return f"https://www.tradingview.com/script/{slug}/" if slug else \
+        "https://www.tradingview.com/scripts/"
+
+
+def _scripts_page(q: dict) -> bytes:
+    """采集到的开源策略清单：搜索 / 按类型筛选 / 排序 / 分页。"""
+    qs = (q.get("q") or [""])[0].strip()
+    kind = (q.get("kind") or [""])[0]
+    sort = (q.get("sort") or ["agree"])[0]
+    page = max(1, int((q.get("page") or ["1"])[0] or 1))
+    per = 60
+
+    store.init()
+    rows, total = store.list_scripts(kind=kind, q=qs, sort=sort,
+                                     limit=per, offset=(page - 1) * per)
+    kinds = store.script_kinds()
+    hv = (store.get_state("harvest") or {})
+    stats = store.script_stats()
+    pages = max(1, (total + per - 1) // per)
+
+    def qs_with(**kw):
+        base = {"q": qs, "kind": kind, "sort": sort, "page": page}
+        base.update(kw)
+        return "&".join(f"{k}={html.escape(str(v))}" for k, v in base.items() if v)
+
+    body_rows = "".join(
+        f"<tr><td><a href='/script/{html.escape(r['sid'].split(';')[-1])}'>"
+        f"{html.escape(r['title'] or '(无题)')}</a></td>"
+        f"<td class='note'>{html.escape(r['author'] or '')}</td>"
+        f"<td>{r['agree']:,}</td><td>{html.escape(r['kind'] or '')}</td>"
+        f"<td>{r['lines'] or 0}</td>"
+        f"<td class='note'>{html.escape(str(r['first_seen'] or '')[:10])}</td>"
+        f"<td><a href='{_script_url(r)}' target='_blank' rel='noopener'>TV</a></td></tr>"
+        for r in rows) or "<tr><td colspan='7' class='note'>没有匹配的脚本</td></tr>"
+
+    opts = "".join(f'<option value="{k}"{" selected" if k == kind else ""}>{k}</option>'
+                   for k in kinds)
+    sorts = [("agree", "按点赞"), ("lines", "按行数"), ("new", "按首次采集"),
+             ("seen", "按最近更新"), ("title", "按标题")]
+    sopts = "".join(f'<option value="{k}"{" selected" if k == sort else ""}>{v}</option>'
+                    for k, v in sorts)
+    pager = " ".join(
+        f"<a href='/scripts?{qs_with(page=p)}'>{'[' + str(p) + ']' if p == page else p}</a>"
+        for p in range(max(1, page - 3), min(pages, page + 3) + 1))
+
+    body = f"""
+<h1>策略语料库</h1>
+<div class="sub">调度器每轮都会增量采集 TradingView 的<b>开源</b> Pine 脚本
+（闭源脚本拿不到源码，不入库）。这里可以搜索、按类型筛选、点开看完整源码。</div>
+
+<div class="cards">
+  <div class="card"><div class="k">开源脚本</div><div class="v">{stats.get('total') or 0}</div></div>
+  <div class="card"><div class="k">strategy 类型</div><div class="v">{stats.get('strat') or 0}</div></div>
+  <div class="card"><div class="k">study 类型</div><div class="v">{stats.get('study') or 0}</div></div>
+  <div class="card"><div class="k">上次采集新增</div><div class="v">{hv.get('value', {}).get('new', '—')}</div></div>
+</div>
+<p class="note">最近采集：{html.escape(str(hv.get('ts') or '—'))}
+&nbsp;·&nbsp; 采集由系统定时任务驱动；也可以手动补一次：
+<form method="post" action="/scripts/harvest" style="display:inline">
+<button type="submit" style="padding:4px 12px;font-size:13px">立即采集</button></form></p>
+
+<form class="filters" method="get" action="/scripts">
+  <label>搜索</label><input name="q" value="{html.escape(qs)}" placeholder="标题 / 作者 / ID">
+  <label>类型</label><select name="kind"><option value="">全部</option>{opts}</select>
+  <label>排序</label><select name="sort">{sopts}</select>
+  <button type="submit">筛选</button>
+  <span class="note">共 {total} 个</span>
+</form>
+
+<table><thead><tr><th>标题</th><th>作者</th><th>点赞</th><th>类型</th>
+<th>行数</th><th>首次采集</th><th>原页</th></tr></thead>
+<tbody>{body_rows}</tbody></table>
+<p class="note">第 {page}/{pages} 页　{pager}</p>
+"""
+    return _page("策略语料库 · alpha-radar", body)
+
+
+def _script_page(sid: str) -> bytes:
+    """查看单个脚本的 Pine 源码。"""
+    store.init()
+    rec = store.get_script(sid)
+    if rec is None:
+        return _page("未找到", "<h1>未找到该脚本</h1><p><a href='/scripts'>← 返回列表</a></p>")
+    # 只允许读语料库目录内的文件，且文件名来自数据库而非 URL
+    fname = os.path.basename(str(rec.get("file") or ""))
+    f = (config.CORPUS_DIR / "sources" / fname).resolve()
+    if not fname or f.parent != (config.CORPUS_DIR / "sources").resolve() or not f.exists():
+        return _page("源码缺失",
+                     f"<h1>源码文件缺失</h1><p class='note'>{html.escape(fname)}</p>"
+                     f"<p><a href='/scripts'>← 返回列表</a></p>")
+    src = f.read_text(encoding="utf-8", errors="replace")
+    body = f"""
+<h1>{html.escape(rec['title'] or '(无题)')}</h1>
+<div class="sub">{html.escape(rec['author'] or '未知作者')} ·
+{rec['kind'] or ''} · {rec['lines'] or len(src.splitlines())} 行 ·
+点赞 {rec['agree']:,} ·
+<a href="{_script_url(rec)}" target="_blank" rel="noopener">TradingView 原页</a></div>
+<p class="warn">本页源码来自 TradingView 公开发布的开源脚本，版权归原作者所有，
+请遵循其原始许可（Pine 脚本常见 CC BY-NC-SA / MPL-2.0 / MIT）。
+本项目仅用于研究检索与许可范围内的移植。</p>
+<h2>Pine Script</h2>
+<pre class="code"><code>{_highlight_pine(src)}</code></pre>
+<p><a href="/scripts">← 返回列表</a></p>
+"""
+    return _page(f"{rec['title']} · Pine 源码", body)
 
 
 # ==================== 任务 ====================
@@ -369,6 +525,31 @@ class Handler(BaseHTTPRequestHandler):
         threading.Thread(target=worker, daemon=True).start()
         self._redirect(f"/job/{jid}")
 
+    def _trigger_harvest(self) -> None:
+        """手动补采一次（与定时任务共用同一把锁，不会叠跑）。"""
+        try:
+            from . import scheduler
+        except Exception as exc:
+            return self._send(500, _page("错误", f"<h1>调度器不可用</h1>"
+                                         f"<pre class='note'>{html.escape(str(exc))}</pre>"))
+        if any(j["state"] == "running" for j in _jobs.values()):
+            return self._send(429, _page("忙", "<h1>已有任务在跑</h1>"
+                                         "<p><a href='/scripts'>← 返回</a></p>"))
+        jid = uuid.uuid4().hex[:12]
+        _jobs[jid] = {"state": "running", "started": time.time(),
+                      "label": "采集 TradingView 开源策略"}
+
+        def worker():
+            try:
+                out = scheduler.harvest_only()
+                _jobs[jid].update(state="done", report="",
+                                  summary=f"语料库 {out.get('total')} 个，新增 {out.get('new')}")
+            except Exception as exc:
+                _jobs[jid].update(state="error", error=f"{type(exc).__name__}: {exc}")
+
+        threading.Thread(target=worker, daemon=True).start()
+        self._redirect(f"/job/{jid}")
+
     def _send(self, code: int, body: bytes, ctype="text/html; charset=utf-8") -> None:
         self.send_response(code)
         self.send_header("Content-Type", ctype)
@@ -405,6 +586,21 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 return self._send(500, _page("错误", f"<h1>读取结果库失败</h1>"
                                              f"<pre class='note'>{html.escape(str(exc))}</pre>"))
+        if p == "/scripts":
+            try:
+                return self._send(200, _scripts_page(parse_qs(u.query)))
+            except Exception as exc:
+                return self._send(500, _page("错误", f"<h1>读取语料库失败</h1>"
+                                             f"<pre class='note'>{html.escape(str(exc))}</pre>"))
+        if p.startswith("/script/"):
+            ref = p[8:]
+            if not NAME_RE.match(ref):
+                return self._send(400, b"bad id")
+            try:
+                return self._send(200, _script_page(ref))
+            except Exception as exc:
+                return self._send(500, _page("错误", f"<h1>读取源码失败</h1>"
+                                             f"<pre class='note'>{html.escape(str(exc))}</pre>"))
         if p == "/cover.png":
             f = Path(__file__).resolve().parents[1] / "promo" / "zhihu-cover.png"
             if f.exists():
@@ -428,6 +624,8 @@ class Handler(BaseHTTPRequestHandler):
         p = urlparse(self.path).path
         if p == "/runs/trigger":
             return self._trigger_cycle()
+        if p == "/scripts/harvest":
+            return self._trigger_harvest()
         if p != "/run":
             return self._send(404, b"not found")
         n = int(self.headers.get("Content-Length", 0))

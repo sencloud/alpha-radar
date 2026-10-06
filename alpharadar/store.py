@@ -133,6 +133,63 @@ def top_scripts(limit: int = 20, path: Path | None = None) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+_SCRIPT_SORTS = {
+    "agree": "agree DESC, lines DESC",
+    "lines": "lines DESC, agree DESC",
+    "new": "first_seen DESC, agree DESC",
+    "seen": "last_seen DESC, agree DESC",
+    "title": "title COLLATE NOCASE ASC",
+}
+
+
+def list_scripts(kind: str = "", q: str = "", sort: str = "agree",
+                 limit: int = 100, offset: int = 0,
+                 path: Path | None = None) -> tuple[list[dict], int]:
+    """采集到的脚本清单（分页）；返回 (本页数据, 总数)。"""
+    where, args = ["access LIKE 'open%'"], []
+    if kind:
+        where.append("kind = ?")
+        args.append(kind)
+    if q:
+        where.append("(title LIKE ? OR author LIKE ? OR sid LIKE ?)")
+        args += [f"%{q}%"] * 3
+    clause = " AND ".join(where)
+    order = _SCRIPT_SORTS.get(sort, _SCRIPT_SORTS["agree"])
+    with connect(path) as con:
+        total = con.execute(f"SELECT COUNT(*) c FROM scripts WHERE {clause}",
+                            args).fetchone()["c"]
+        rows = con.execute(
+            f"SELECT sid, slug, title, author, agree, kind, lines, file, "
+            f"first_seen, last_seen FROM scripts WHERE {clause} "
+            f"ORDER BY {order} LIMIT ? OFFSET ?", [*args, limit, offset]).fetchall()
+    return [dict(r) for r in rows], int(total)
+
+
+def get_script(sid: str, path: Path | None = None) -> dict | None:
+    """按完整 sid（PUB;xxx）或仅哈希部分查询。"""
+    with connect(path) as con:
+        r = con.execute("SELECT * FROM scripts WHERE sid=? OR sid LIKE ?",
+                        (sid, f"%;{sid}")).fetchone()
+    return dict(r) if r else None
+
+
+def script_kinds(path: Path | None = None) -> list[str]:
+    with connect(path) as con:
+        rows = con.execute(
+            "SELECT kind, COUNT(*) n FROM scripts WHERE access LIKE 'open%' "
+            "AND kind <> '' GROUP BY kind ORDER BY n DESC").fetchall()
+    return [r["kind"] for r in rows]
+
+
+def script_authors(limit: int = 20, path: Path | None = None) -> list[dict]:
+    with connect(path) as con:
+        rows = con.execute(
+            "SELECT author, COUNT(*) n, SUM(agree) likes FROM scripts "
+            "WHERE access LIKE 'open%' AND author <> '' GROUP BY author "
+            "ORDER BY n DESC LIMIT ?", (limit,)).fetchall()
+    return [dict(r) for r in rows]
+
+
 # ---------- results ----------
 def add_result(row: dict, path: Path | None = None) -> None:
     vals = [row.get(c) for c in RESULT_COLS]

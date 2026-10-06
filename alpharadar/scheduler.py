@@ -127,6 +127,25 @@ def run_cycle(cfg: dict | None = None, force: bool = False, limit: int = 0,
                             client, out, with_harvest)
 
 
+def harvest_only(cfg: dict | None = None, out=print) -> dict:
+    """只补采语料库（与定时任务共用同一把锁）。"""
+    cfg = cfg or load_universe()
+    LOCK.parent.mkdir(parents=True, exist_ok=True)
+    with open(LOCK, "w") as lk:
+        if not _flock_nb(lk):
+            out("[skip] 已有一轮在跑，本次采集退出")
+            return {"skipped": True}
+        run_id = store.start_run("harvest", "manual")
+        try:
+            res = do_harvest(cfg, run_id, out)
+            store.finish_run(run_id, "ok", n_ok=1, n_err=0)
+            return res
+        except Exception as exc:
+            store.finish_run(run_id, "error", 0, 1,
+                             note=f"{type(exc).__name__}: {exc}"[:300])
+            raise
+
+
 def _cycle_inner(cfg, force, limit, only_symbol, only_strategy, client, out,
                  with_harvest: bool = True) -> dict:
     t0 = time.time()
