@@ -238,6 +238,10 @@ def _scripts_page(q: dict) -> bytes:
     stats = store.script_stats()
     pages = max(1, (total + per - 1) // per)
 
+    def _ch(hv_state: dict, key: str) -> str:
+        """读取 harvest 状态里的通道计数。"""
+        return str(((hv_state.get("value") or {}).get("channels") or {}).get(key, "—"))
+
     def qs_with(**kw):
         base = {"q": qs, "kind": kind, "sort": sort, "page": page}
         base.update(kw)
@@ -266,7 +270,9 @@ def _scripts_page(q: dict) -> bytes:
     body = f"""
 <h1>策略语料库</h1>
 <div class="sub">调度器每轮都会增量采集 TradingView 的<b>开源</b> Pine 脚本
-（闭源脚本拿不到源码，不入库）。这里可以搜索、按类型筛选、点开看完整源码。</div>
+（闭源脚本拿不到源码，不入库）。三条通道并行：
+<b>关键词搜索</b>（热门脚本）、<b>脚本流</b>（最新发布）、<b>论坛帖</b>（社区帖子）。
+这里可以搜索、按类型筛选、点开看完整源码。</div>
 
 <div class="cards">
   <div class="card"><div class="k">开源脚本</div><div class="v">{stats.get('total') or 0}</div></div>
@@ -275,6 +281,9 @@ def _scripts_page(q: dict) -> bytes:
   <div class="card"><div class="k">上次采集新增</div><div class="v">{hv.get('value', {}).get('new', '—')}</div></div>
 </div>
 <p class="note">最近采集：{html.escape(str(hv.get('ts') or '—'))}
+&nbsp;·&nbsp; 通道产出：搜索 {_ch(hv, 'search')} / 脚本流 {_ch(hv, 'feed')} /
+论坛 {_ch(hv, 'forum')}（正文代码块 {_ch(hv, 'forum_snippets')}）
+&nbsp;·&nbsp; 本轮新下载 {_ch(hv, 'downloaded')}
 &nbsp;·&nbsp; 采集由系统定时任务驱动；也可以手动补一次：
 <form method="post" action="/scripts/harvest" style="display:inline">
 <button type="submit" style="padding:4px 12px;font-size:13px">立即采集</button></form></p>

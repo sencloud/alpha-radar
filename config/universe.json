@@ -3,6 +3,8 @@
   "start": "20220101",
   "max_age_days": 7,
   "harvest_max_fetch": 300,
+  "harvest_feed_pages": 50,
+  "harvest_forum_pages": 50,
   "strategies": [
     "utbot",
     "supertrend",

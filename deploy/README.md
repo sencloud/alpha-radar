@@ -58,7 +58,9 @@ python deploy\deploy.py --steps upload,systemd,verify
 
 `alpharadar-scheduler.timer` 每 6 小时触发一次 `alpharadar-scheduler.service`：
 
-1. **增量采集** TradingView 开源脚本（已下过的不重复请求）
+1. **增量采集** TradingView 开源脚本，三条通道并行：
+   关键词搜索 / 最新脚本流（`api/v1/scripts/`）/ 论坛帖（`api/v1/ideas/`）。
+   已下过的文件不重复请求，`harvest_max_fetch` 限制每轮新增下载数
 2. **扫描回测** `config/universe.json` 里的 品种 × 周期 × 策略
 3. 结果写进 `/opt/alpha-radar/data/alpharadar.db`（SQLite，WAL）
 

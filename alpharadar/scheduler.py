@@ -128,15 +128,25 @@ def _stale(cells: list[dict], max_age_days: int, force: bool,
 def do_harvest(cfg: dict, run_id: int, out=print) -> dict:
     """增量采集 TradingView 开源脚本并入语料库。"""
     from .harvest import harvest
+    stats: dict = {}
     scripts = harvest(max_fetch=int(cfg.get("harvest_max_fetch", 300)),
-                      progress=lambda *a: None)      # 静默，避免日志刷屏
+                      feed_pages=int(cfg.get("harvest_feed_pages", 50)),
+                      forum_pages=int(cfg.get("harvest_forum_pages", 50)),
+                      progress=lambda *a: None,      # 静默，避免日志刷屏
+                      stats=stats)
     total, new = store.upsert_scripts(scripts)
     st = store.script_stats()
     store.set_state("harvest", {"total": total, "new": new,
                                 "open": int(st.get("open") or 0),
-                                "strategy": int(st.get("strat") or 0)})
-    out(f"[harvest] 语料库 {total} 个（开源 {st.get('open')}），本次新增 {new}")
-    return {"total": total, "new": new}
+                                "strategy": int(st.get("strat") or 0),
+                                "channels": {k: stats.get(k, 0)
+                                             for k in ("search", "feed", "forum",
+                                                       "forum_snippets", "downloaded")}})
+    out(f"[harvest] 语料库 {total} 个（开源 {st.get('open')}），本次新增 {new}；"
+        f"通道产出 搜索{stats.get('search', 0)} / 脚本流{stats.get('feed', 0)} / "
+        f"论坛{stats.get('forum', 0)}（代码块 {stats.get('forum_snippets', 0)}），"
+        f"本轮新下载 {stats.get('downloaded', 0)}")
+    return {"total": total, "new": new, **stats}
 
 
 def run_cycle(cfg: dict | None = None, force: bool = False, limit: int = 0,
@@ -256,10 +266,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--strategy", default="")
     ap.add_argument("--universe", default=str(UNIVERSE))
     ap.add_argument("--no-harvest", action="store_true", help="只回测，不采集")
+    ap.add_argument("--harvest-only", action="store_true",
+                    help="只采集语料库，不回测（运维/手动补采）")
     args = ap.parse_args(argv)
 
     store.init()
     cfg = load_universe(Path(args.universe))
+    if args.harvest_only:
+        harvest_only(cfg)
+        return 0
     if args.loop:
         while True:
             try:

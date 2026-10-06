@@ -230,3 +230,48 @@ def test_pine_highlight_escapes_html():
     assert "&lt;script&gt;" in out
     assert "c-com" in out and "c-ns" in out
     assert out.count('class="ln"') == 3          # 行号包裹
+
+
+def test_extract_pine_blocks():
+    """论坛正文里的代码块抽取（含噪声过滤与 HTML 反转义）。"""
+    from alpharadar.harvest import extract_pine_blocks
+
+    body = ('<p>my idea</p>'
+            '<pre class="language-pine">//@version=5\n'
+            'indicator("demo")\nplot(close, color=color.red)</pre>'
+            '<pre>this is just a paragraph, not code at all</pre>'
+            '<code>ta.sma(close, 20)</code>')
+    blocks = extract_pine_blocks(body)
+    assert len(blocks) == 1
+    assert "//@version=5" in blocks[0] and "indicator(" in blocks[0]
+    # 没写 Pine 提示词的代码块不算
+    assert extract_pine_blocks("<pre>" + "x" * 100 + "</pre>") == []
+    # HTML 实体要还原
+    ent = extract_pine_blocks("<pre>//@version=5\nindicator('x')\n"
+                              "plot(a &amp;&amp; b, title=&#39;x&#39;)\nplot(close)</pre>")
+    assert ent and "&&" in ent[0] and "'x'" in ent[0]
+
+
+def test_feed_record_to_script():
+    """脚本流/论坛记录 -> 语料库条目（闭源或缺 id 的被拒）。"""
+    from alpharadar.harvest import _feed_record_to_script
+
+    rec = {"script_id_part": "PUB;abc", "image_url": "xyz", "name": "Demo",
+           "user": {"username": "alice"}, "likes_count": 7, "is_picked": True,
+           "script_type": "strategy"}
+    s = _feed_record_to_script(rec)
+    assert s and s.id == "PUB;abc" and s.kind == "strategy" and s.agree == 7
+    assert s.is_open is False                     # access 未知时不算开源
+    assert _feed_record_to_script({"name": "no id"}) is None
+    ind = _feed_record_to_script({**rec, "script_type": "indicator"})
+    assert ind.kind == "study"                    # 非 strategy/library 归为 study
+
+
+def test_harvest_channels_are_configurable():
+    """channels 参数要能关掉某些通道（离线测试用 search 之外的不联网）。"""
+    import inspect
+    from alpharadar.harvest import harvest
+
+    sig = inspect.signature(harvest)
+    assert sig.parameters["channels"].default == ("search", "feed", "forum")
+    assert "stats" in sig.parameters
