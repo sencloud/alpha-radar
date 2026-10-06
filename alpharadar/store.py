@@ -56,6 +56,19 @@ CREATE TABLE IF NOT EXISTS tasks(
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_due ON tasks(next_due);
 CREATE INDEX IF NOT EXISTS idx_tasks_state ON tasks(state, next_due);
+
+-- Pine 移植台账：语料库里每个脚本的翻译状态
+CREATE TABLE IF NOT EXISTS ports(
+  sid TEXT PRIMARY KEY, title TEXT, author TEXT, agree INTEGER,
+  kind TEXT, family TEXT,            -- 指标族（oscillator/bands/trend/...）
+  strategy_key TEXT,                 -- 移植后的策略 key（可空）
+  wrapper TEXT,                      -- 用了哪个包装器（study -> strategy）
+  risk TEXT,                         -- 检测到的重绘/未来函数风险
+  status TEXT DEFAULT 'pending',     -- pending | ported | verified | rejected
+  score REAL, notes TEXT,
+  updated_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ports_status ON ports(status, score);
 """
 
 RESULT_COLS = ("run_id", "ts", "symbol", "name", "market", "strategy", "freq",

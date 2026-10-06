@@ -360,3 +360,80 @@ def _ema_cross(df: pd.DataFrame, p: dict) -> pd.DataFrame:
     flip = apply_regime_gate(flip, df, p)
     tag = np.where(flip > 0, "金叉", np.where(flip < 0, "死叉", ""))
     return signal_frame(df, flip, stop=stop, st_stop=stop, tag=tag)
+
+
+# ==================== 移植：Range Filter（指标 -> 策略） ====================
+# 来源：TradingView「Range Filter Buy and Sell 5min」（原作者 @DonovanWall，
+#      @guikroth 改编，@tvenn 发布 pine v5 版）
+# 包装器：trend 家族 —— 方向翻转。原脚本是 indicator（只画线与箭头），
+#        这里把它的 longCond/shortCond 状态机转成入场信号，
+#        并把 filter 线本身用作跟踪止损（这正是它的设计意图）。
+_RANGEFILTER_DEFAULTS = {
+    "rf_per": 100,        # Sampling Period
+    "rf_mult": 3.0,       # Range Multiplier
+    "use_target": 0,
+    "trail_stop": 1,
+    "max_hold_bars": 100000,
+    "cooldown_bars": 0,
+    "max_entries_per_day": 99,
+}
+
+
+@register("rangefilter", "Range Filter Buy and Sell",
+          source="TradingView @tvenn（原作 @DonovanWall / @guikroth）",
+          license="—", source_sid="PUB;65cb6743381a42b5920a6cf52357",
+          freqs=("1min", "5min", "15min", "30min", "60min", "1d"),
+          defaults=_RANGEFILTER_DEFAULTS,
+          notes="移植自 Range Filter：方向翻转入场，filter 线做跟踪止损。"
+                "原为 indicator，按 trend 包装器转成策略。")
+def _rangefilter(df: pd.DataFrame, p: dict) -> pd.DataFrame:
+    n = len(df)
+    c = df["close"].to_numpy(float)
+    per = max(1, int(p["rf_per"]))
+    mult = float(p["rf_mult"])
+
+    # smoothrng = EMA(EMA(|x - x[1]|, t), t*2-1) * m
+    s = pd.Series(c)
+    avrng = s.diff().abs().ewm(span=per, adjust=False).mean()
+    smrng = avrng.ewm(span=per * 2 - 1, adjust=False).mean().to_numpy() * mult
+    smrng = np.nan_to_num(smrng, nan=0.0)
+
+    # rngfilt 状态机（逐 bar，只用历史）：首根 Pine 用 nz(filt[1]) = 0
+    filt = np.empty(n)
+    prev = 0.0
+    for i in range(n):
+        r = smrng[i]
+        if c[i] > prev:
+            cur = prev if (c[i] - r) < prev else c[i] - r
+        else:
+            cur = prev if (c[i] + r) > prev else c[i] + r
+        filt[i] = cur
+        prev = cur
+
+    # upward / downward 计数（Pine 的 var 递推）
+    upward = np.zeros(n)
+    downward = np.zeros(n)
+    for i in range(1, n):
+        if filt[i] > filt[i - 1]:
+            upward[i], downward[i] = upward[i - 1] + 1, 0.0
+        elif filt[i] < filt[i - 1]:
+            upward[i], downward[i] = 0.0, downward[i - 1] + 1
+        else:
+            upward[i], downward[i] = upward[i - 1], downward[i - 1]
+
+    # 原脚本的 longCond/shortCond 化简后就是「方向态 + 价在 filter 同侧」
+    long_now = (c > filt) & (upward > 0)
+    short_now = (c < filt) & (downward > 0)
+    state = np.zeros(n, dtype=np.int8)
+    cur = 0
+    for i in range(n):
+        if long_now[i]:
+            cur = 1
+        elif short_now[i]:
+            cur = -1
+        state[i] = cur
+    flip = np.zeros(n, dtype=np.int8)
+    flip[1:] = np.where(state[1:] != state[:-1], state[1:], 0)
+    tag = np.where(flip > 0, "RF翻多", np.where(flip < 0, "RF翻空", ""))
+    # filter 线本身即跟踪止损位
+    return signal_frame(df, flip, stop=filt, st_stop=filt, tag=tag)

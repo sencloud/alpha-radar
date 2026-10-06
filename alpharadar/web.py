@@ -348,6 +348,11 @@ def _runs_page(q: dict) -> bytes:
     wk = (store.get_state("worker") or {}).get("value") or {}
     ins = (store.get_state("instruments") or {}).get("value") or {}
     ts = store.task_stats()
+    try:
+        from .porting.triage import port_stats
+        ps = port_stats()
+    except Exception:
+        ps = {"by_status": {}, "by_family": {}, "top": []}
     ss = store.script_stats()
     rows = store.latest_results(symbol=symbol, strategy=strategy, freq=freq,
                                 market=market)
@@ -378,6 +383,18 @@ def _runs_page(q: dict) -> bytes:
     ins_line = (f"品种 {ins.get('instruments', 0):,} 个"
                 f"（{by_mkt}）" if ins else "尚未同步品种表")
     queue_html = f"""
+<h2>Pine 移植进度</h2>
+<div class="cards">
+  <div class="card"><div class="k">待移植</div><div class="v">{ps['by_status'].get('pending', 0):,}</div></div>
+  <div class="card"><div class="k">已派单</div><div class="v">{ps['by_status'].get('ported', 0):,}</div></div>
+  <div class="card"><div class="k">已通过校验</div><div class="v up">{ps['by_status'].get('verified', 0):,}</div></div>
+  <div class="card"><div class="k">校验未过</div><div class="v down">{ps['by_status'].get('rejected', 0):,}</div></div>
+</div>
+<p class="note">按指标族：{' · '.join(f'{k} {v}' for k, v in list(ps['by_family'].items())[:8]) or '—'}
+&nbsp;·&nbsp; 流程见 <a href="https://github.com/sencloud/alpha-radar/blob/main/docs/porting.md">docs/porting.md</a>
+（分诊 → 工单 → 实现 → 机械校验 → 入队）。
+<b>指标也能变策略</b>：按七个标准包装器把指标转成入场/出场规则。</p>
+
 <h2>全市场任务队列</h2>
 <div class="cards">
   <div class="card"><div class="k">总量</div><div class="v">{total:,}</div></div>

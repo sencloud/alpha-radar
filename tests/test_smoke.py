@@ -380,3 +380,107 @@ def test_cache_lru_eviction(tmp_path):
     left = {p.name for p in tmp_path.glob("*")}
     assert n >= 1 and "RB.DCE_mapping.csv" in left
     assert "a_ft_mins_1min.csv" not in left         # 最旧的先删
+
+
+# ==================== Pine 移植流水线 ====================
+def test_porting_classify():
+    """分诊要能识别指标族、原生策略、重绘风险，并据此打分排序。"""
+    from alpharadar.porting.triage import classify
+
+    rsi_study = '//@version=5\nindicator("RSI")\nr = ta.rsi(close, 14)\nplot(r)'
+    c = classify(rsi_study, kind="study", agree=1000)
+    assert c["family"] == "oscillator" and not c["is_strategy"]
+    assert c["risks"] == []
+
+    st = ('//@version=5\nstrategy("ST")\n[_, d] = ta.supertrend(3, 10)\n'
+          'if d < 0\n    strategy.entry("L", strategy.long)')
+    c2 = classify(st, kind="strategy")
+    assert c2["is_strategy"] and c2["family"] == "trend"
+    assert c2["score"] > c["score"]                 # 原生策略应排更前
+
+    risky = '//@version=5\nx = request.security(syminfo.tickerid, "D", close, lookahead=barmerge.lookahead_on)'
+    c3 = classify(risky, kind="study")
+    assert c3["risks"] and c3["score"] < c["score"]  # 重绘风险要扣分
+
+    c4 = classify('//@version=5\nlibrary("x")', kind="library")
+    assert c4["family"] == "unknown"
+
+
+def test_port_stats_shape(tmp_path):
+    from alpharadar import store
+    from alpharadar.porting.triage import port_stats
+
+    db = tmp_path / "t.db"
+    store.init(db)
+    with store.connect(db) as con:
+        con.execute("INSERT INTO ports(sid,title,kind,family,status,score) "
+                    "VALUES('PUB;a','A','study','trend','pending',50)")
+        con.execute("INSERT INTO ports(sid,title,kind,family,status,score) "
+                    "VALUES('PUB;b','B','study','bands','verified',40)")
+    # port_stats 走默认库，这里只验证 SQL 结构正确
+    st = port_stats()
+    assert set(st) == {"by_status", "by_family", "top"}
+
+
+def test_verify_gates_catch_lookahead():
+    """最关键的一道闸门：用了未来数据必须被抓出来。"""
+    import numpy as np
+    from alpharadar.porting.verify import check_no_lookahead
+
+    bad = '//@version=5'
+    # 伪造一个「偷看未来」的策略：用 shift(-1)
+    def _lookahead(df, p):
+        c = df["close"].astype(float)
+        sig = np.zeros(len(df), dtype=np.int8)
+        fut = c.shift(-1).to_numpy()                 # 未来数据！
+        cur = c.to_numpy()
+        sig[:-1] = np.where(fut[:-1] > cur[:-1], 1, -1)
+        from alpharadar.strategies.base import signal_frame
+        return signal_frame(df, sig, min_bars=0)
+
+    from alpharadar.strategies.base import REGISTRY, Strategy
+    REGISTRY["_test_lookahead"] = Strategy("_test_lookahead", "bad", _lookahead)
+    try:
+        from alpharadar.porting.verify import synth_bars
+        errs = check_no_lookahead("_test_lookahead", synth_bars(1200), {})
+        assert errs and "未来数据" in errs[0]
+    finally:
+        REGISTRY.pop("_test_lookahead", None)
+
+
+def test_verify_gates_pass_for_existing():
+    """现有 7 个策略在合成数据上至少要通过「无未来函数 + 可复现」两道闸门。"""
+    from alpharadar.porting.verify import synth_bars, verify_strategy
+
+    bars = synth_bars(1500)
+    for key in ("utbot", "supertrend", "chandelier", "ema_cross", "orb",
+                "false_breakout"):
+        r = verify_strategy(key, bars=bars)
+        fatal = [e for e in r["errors"] if "未来数据" in e or "不可复现" in e
+                 or "取值越界" in e]
+        assert not fatal, f"{key} 出现致命问题：{fatal}"
+
+
+def test_scaffold_worksheet_contains_key_parts(tmp_path):
+    """工单必须带齐：源码头、建议包装器、Python 模板、硬要求。"""
+    import alpharadar.porting.scaffold as sc
+    from alpharadar import store
+    from alpharadar.config import CORPUS_DIR
+
+    src_dir = CORPUS_DIR / "sources"
+    src_dir.mkdir(parents=True, exist_ok=True)
+    f = src_dir / "_test_ws.pine"
+    f.write_text('//@version=5\nindicator("T")\nr = ta.rsi(close, 14)\nplot(r)',
+                 encoding="utf-8")
+    store.init()
+    store.upsert_scripts([__import__("alpharadar.harvest", fromlist=["Script"]).Script(
+        id="PUB;wstest", slug="wstest", title="RSI Demo", author="alice",
+        agree=10, kind="study", access="open_no_auth", lines=4, file="_test_ws.pine")])
+    with store.connect() as con:
+        con.execute("INSERT OR REPLACE INTO ports(sid,title,kind,family,status,score,risk)"
+                    " VALUES('PUB;wstest','RSI Demo','study','oscillator','pending',40,'')")
+    text = sc.make_worksheet("PUB;wstest")
+    for part in ("移植工单", "建议包装器", "oscillator", "@register", "原始 Pine 源码",
+                 "verify", "硬要求"):
+        assert part in text, f"工单缺少 {part}"
+    f.unlink()

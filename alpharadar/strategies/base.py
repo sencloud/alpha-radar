@@ -29,17 +29,20 @@ class Strategy:
     freqs: tuple = ()                    # 适用周期白名单（空 = 不限）。
                                          # 日内形态配日线数据必然 0 笔，
                                          # scheduler.build_cells 会跳过这类组合
+    source_sid: str = ""                 # 移植来源：语料库脚本 id（可追溯到原作者）
 
 
 REGISTRY: dict[str, Strategy] = {}
 
 
 def register(key: str, name: str, source: str = "", license: str = "",
-             notes: str = "", defaults: dict | None = None, freqs: tuple = ()):
+             notes: str = "", defaults: dict | None = None, freqs: tuple = (),
+             source_sid: str = ""):
     def deco(fn):
         REGISTRY[key] = Strategy(key=key, name=name, fn=fn, source=source,
                                  license=license, notes=notes,
-                                 defaults=dict(defaults or {}), freqs=tuple(freqs))
+                                 defaults=dict(defaults or {}), freqs=tuple(freqs),
+                                 source_sid=source_sid)
         return fn
     return deco
 
@@ -57,11 +60,20 @@ def list_strategies() -> list[Strategy]:
 def signal_frame(df: pd.DataFrame, sig: np.ndarray,
                  stop: np.ndarray | None = None,
                  st_stop: np.ndarray | None = None,
-                 tag: np.ndarray | None = None) -> pd.DataFrame:
-    """把策略输出统一成引擎要求的列。"""
+                 tag: np.ndarray | None = None,
+                 min_bars: int = 60) -> pd.DataFrame:
+    """把策略输出统一成引擎要求的列。
+
+    min_bars：**中央预热纪律** —— 序列前 min_bars 根一律不出信号。
+    指标在预热期未成形，此时出的信号是噪音；更重要的是，把它放在这里
+    而不是每个策略里，新移植的策略自动获得这个保证（verify 会检查）。
+    """
     out = df.copy()
     n = len(out)
-    out["sig"] = np.asarray(sig, dtype=np.int8)
+    s = np.asarray(sig, dtype=np.int8).copy()
+    if min_bars and n > min_bars:
+        s[:min_bars] = 0
+    out["sig"] = s
     out["stop_px"] = np.full(n, np.nan) if stop is None else np.asarray(stop, float)
     out["st_stop"] = (out["stop_px"].to_numpy() if st_stop is None
                       else np.asarray(st_stop, float))

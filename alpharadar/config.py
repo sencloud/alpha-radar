@@ -42,6 +42,8 @@ def load_env(path: Path | None = None) -> None:
 # ==================== 回测默认参数 ====================
 # 这些是所有策略共用的「引擎层」参数；策略自身的参数放在 strategies/library.py。
 DEFAULTS: dict = {
+    # 中央预热纪律：序列前 min_bars 根不出信号（见 strategies/base.signal_frame）
+    "min_bars": 60,
     # 指标
     "atr_n": 14,
     "atr_period": 10,         # 趋势族 ATR 周期
