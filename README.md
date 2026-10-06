@@ -87,6 +87,33 @@ alpharadar matrix --symbols P.DCE,Y.DCE,M.DCE \
 
 ## 两只手：确定性内核 + agent 大脑
 
+### 全市场回测：任务队列 + 常驻 worker
+
+全市场是 **4 万量级**的回测单元（全 A 股 + 全期货品种 × 各自可用周期 × 全部策略），
+一轮跑不完，所以用**持久化任务队列**而不是固定清单：
+
+```
+alpharadar-scheduler.timer  (每 6h)  -> 采集语料库 + 同步品种表/任务队列
+alpharadar-worker.service   (常驻)   -> 从队列取到期任务，串行回测
+```
+
+- 成功 → `next_due = 现在 + 7 天`；失败 → `+6 小时`自动重试
+- 进程内 `flock` 防重入；磁盘低于 2GB 自动暂停（同机还有两个邻居服务）
+- `Nice=10 / CPUWeight=20 / IOWeight=20`，不抢资源
+- 看板 <https://alpha-radar.infiniti.website/runs> 有实时队列进度与 ETA
+
+改范围只动 `config/universe.json` 的 `auto` 段：
+
+```json
+"stocks":  {"freqs": ["1d","1min","5min","15min","30min","60min"],
+            "minute_top_n": 300, "start_minute": "20240101"},
+"futures": {"freqs": ["1min","5min","15min","30min","60min","1d"]}
+```
+
+**物理约束（必须知道）**：全市场 1 分钟数据约 **78GB**，普通云主机放不下。
+所以默认策略是「**日线跑全市场，分钟级按流动性分层**」——
+A 股全市场跑日线，分钟级只覆盖成交额前 300 只；期货品种少（103 个），六个周期全开。
+
 **无人值守**：`alpharadar-scheduler.timer` 每 6 小时跑一轮
 「增量采集 TradingView 开源脚本 → 扫描 `config/universe.json` 里的品种×周期×策略 → 写 SQLite」。
 某个组合在 `max_age_days` 内成功过就跳过；需要重跑的按上次成功时间从旧到新排队，

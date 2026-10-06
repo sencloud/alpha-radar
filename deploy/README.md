@@ -88,6 +88,25 @@ journalctl -u alpharadar-scheduler -n 50 --no-pager
 
 ## 看板
 
+## 全市场 worker
+
+```powershell
+$w = "C:\Program Files\workbench\workbench.exe"
+& $w exec -i i-mj758zcz8k917p3ppsuj -c "systemctl status alpharadar-worker --no-pager | head -12"
+& $w exec -i i-mj758zcz8k917p3ppsuj -c "journalctl -u alpharadar-worker -n 50 --no-pager"
+& $w exec -i i-mj758zcz8k917p3ppsuj -c "systemctl restart alpharadar-worker"
+```
+
+```bash
+# 手动同步品种表与任务队列（改完 universe.json 后）
+sudo -u alpharadar /opt/alpha-radar/.venv/bin/python -m alpharadar.worker --sync --minutes 0.1
+# 只跑 20 个任务做验证
+sudo -u alpharadar /opt/alpha-radar/.venv/bin/python -m alpharadar.worker --minutes 0 --limit 20
+```
+
+队列在 `data/alpharadar.db` 的 `tasks` 表；`state` 表里的 `worker` 键存最近一次
+运行状态（速率、进度），看板据此算 ETA。
+
 <https://alpha-radar.infiniti.website/runs> —— 调度状态、语料库统计、品种列表、
 结果榜（按 PF 排序，可按品种/策略/周期/市场筛选）、运行记录，以及「立即扫描一轮」按钮。
 
