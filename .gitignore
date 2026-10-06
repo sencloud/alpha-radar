@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+
+# 运行产物
+data_cache/
+corpus/
+reports/
+*.log
+
+# 编辑器
+.idea/
+.vscode/
+.DS_Store

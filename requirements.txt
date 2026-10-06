@@ -1,0 +1,7 @@
+pandas>=2.0
+numpy>=1.24
+requests>=2.31
+tushare>=1.4
+
+# 可选：图形/HTML 报告与 Notebook 示例
+matplotlib>=3.7

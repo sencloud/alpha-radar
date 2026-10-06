@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "alpha-radar"
+version = "0.1.0"
+description = "持续采集 TradingView 开源策略，在 A 股 / 期货上自动回测与检验（Tushare 数据源）"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "alpha-radar contributors" }]
+keywords = ["quant", "backtest", "tradingview", "pine", "tushare", "futures", "a-share", "codex"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Topic :: Office/Business :: Financial :: Investment",
+]
+dependencies = ["pandas>=2.0", "numpy>=1.24", "requests>=2.31", "tushare>=1.4"]
+
+[project.optional-dependencies]
+viz = ["matplotlib>=3.7"]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+alpharadar = "alpharadar.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["alpharadar*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
