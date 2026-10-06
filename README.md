@@ -119,3 +119,9 @@ agent 只能产出信号列 —— 这样它**没有能力**通过改口径造�
 ## License
 
 MIT（本项目代码）。第三方策略按其原始许可（见上表与各文件头）。
+
+## 其他
+
+如果你喜欢我的项目，可以给我买杯咖啡：
+
+<img src="https://github.com/user-attachments/assets/e75ef971-ff56-41e5-88b9-317595d22f81" alt="image" width="300" height="300">
