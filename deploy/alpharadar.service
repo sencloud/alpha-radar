@@ -1,0 +1,41 @@
+# alpha-radar Web 控制台（systemd）
+#
+# 安装：
+#   sudo cp deploy/alpharadar.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now alpharadar
+#
+# 监听 127.0.0.1:8901，由 Caddy 反向代理（见 deploy/alpharadar.caddy）。
+# 本机同时跑 lastdays(8787) 与 infiniti(3100)，端口不要撞。
+
+[Unit]
+Description=alpha-radar strategy radar web console
+Documentation=https://alpha-radar.infiniti.website/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=alpharadar
+Group=alpharadar
+WorkingDirectory=/opt/alpha-radar
+EnvironmentFile=/opt/alpha-radar/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=ALPHARADAR_PORT=8901
+ExecStart=/opt/alpha-radar/.venv/bin/python -m alpharadar.web
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+
+# 只允许写缓存与报告目录
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/alpha-radar/data_cache /opt/alpha-radar/reports
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=alpharadar
+
+[Install]
+WantedBy=multi-user.target

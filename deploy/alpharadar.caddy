@@ -1,0 +1,23 @@
+# alpha-radar 站点片段（本项目独占）
+#
+# 由 deploy/deploy.py 安装到 /etc/caddy/conf.d/alpharadar.caddy。
+# 主 Caddyfile 里只保证有一行 `import /etc/caddy/conf.d/*.caddy`，
+# **绝不要整份覆盖 /etc/caddy/Caddyfile** —— 那会删掉邻居站点块。
+
+alpha-radar.infiniti.website {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8901 {
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+	log {
+		format json
+	}
+}
