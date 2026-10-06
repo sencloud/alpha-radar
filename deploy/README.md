@@ -15,6 +15,19 @@
 5. `workbench exec` 默认 30 秒超时，长命令要加 `--timeout`；复杂脚本用 base64
    传输，避免 PowerShell 引号被本地展开。
 
+   **更正（实测踩坑）**：不要给 `workbench exec` 传 `--timeout`。传了之后会留下
+   一个僵死会话（`STATE=OPEN`），此后每条命令都复用那个坏会话 —— 症状是
+   「所有命令都 30 秒超时、stdout 只回来一半、exit_code 却是 0」。恢复方式：
+
+   ```powershell
+   & $w session list                 # 看是否有长期 OPEN 的会话
+   & $w session close --all          # 关掉所有会话，下一条命令会自动新建
+   ```
+
+   `deploy.py` 已内置这个自愈：exec 走 JSON 模式（能拿到 `timed_out`），
+   超时自动 `session close --all` 后重试一次。长任务（扫描/采集）仍应
+   `setsid` 丢后台再轮询，不要指望一次 exec 跑完。
+
 ## 一键部署
 
 ```powershell

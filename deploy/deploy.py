@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import json
 import os
 import subprocess
 import sys
@@ -50,6 +51,7 @@ ALL_STEPS = ("pack", "upload", "user", "venv", "env", "systemd", "schedule",
 
 # ==================== Workbench 封装 ====================
 def wb(*args: str, timeout: int = 900, check: bool = True) -> str:
+    """调用 workbench 原始子命令（upload / session 等）。"""
     cmd = [str(WORKBENCH), *args]
     p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
                        errors="replace", timeout=timeout)
@@ -59,11 +61,59 @@ def wb(*args: str, timeout: int = 900, check: bool = True) -> str:
     return out
 
 
+def _exec_json(cmd: str, timeout: int = 300) -> dict:
+    """执行远程命令并解析 JSON 结果。
+
+    为什么走 JSON：文本模式偶发丢输出（exit=0 但 stdout 为空）。JSON 里有明确的
+    stdout / stderr / exit_code / timed_out，可以判定、可以重试。
+    """
+    p = subprocess.run([str(WORKBENCH), "exec", "-i", INSTANCE, "-o", "json",
+                        "-c", cmd], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", timeout=timeout + 30)
+    text = ((p.stdout or "") + "\n" + (p.stderr or "")).strip()
+    i = text.find("{")
+    if i < 0:
+        raise RuntimeError(f"workbench 无 JSON 输出：{text[-400:]}")
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(text[i:])
+    except ValueError as exc:
+        raise RuntimeError(f"workbench JSON 解析失败：{text[-400:]}") from exc
+    return obj
+
+
+def reset_sessions() -> None:
+    """关闭所有 workbench 会话。
+
+    踩过的坑：给 exec 传 `--timeout` 会留下僵死会话，之后每条命令都复用那个坏会话
+    —— 表现是「所有命令都 30 秒超时、stdout 只回来一半」。关掉会话立刻恢复。
+    """
+    try:
+        wb("session", "close", "--all", check=False, timeout=60)
+    except Exception:
+        pass
+
+
 def sh(script: str, timeout: int = 900, check: bool = True) -> str:
-    """把多行 bash 脚本 base64 后交给远端执行（避免引号/换行被本地 shell 吃掉）。"""
+    """把多行 bash 脚本 base64 后交给远端执行（避免引号/换行被本地 shell 吃掉）。
+
+    - **不要给 workbench exec 传 `--timeout`**：实测会留下僵死会话，越用越坏。
+    - 单次命令保持短（默认 30 秒上限）；长任务用 setsid 丢后台再轮询。
+    - 超时自动关会话重试一次（会话僵死是最常见的假故障）。
+    """
     b64 = base64.b64encode(script.encode("utf-8")).decode("ascii")
     cmd = f"echo {b64} | base64 -d > /tmp/_ar.sh && bash /tmp/_ar.sh; rm -f /tmp/_ar.sh"
-    return wb("exec", "-i", INSTANCE, "-c", cmd, timeout=timeout, check=check)
+    for _ in range(2):
+        res = _exec_json(cmd, timeout=min(timeout, 300))
+        if not res.get("timed_out"):
+            out = (res.get("stdout") or "") + (res.get("stderr") or "")
+            if check and int(res.get("exit_code") or 0) != 0:
+                raise RuntimeError(f"远程命令失败（{res.get('exit_code')}）："
+                                   f"{out.strip()[-800:]}")
+            return out
+        print("  [warn] 远程命令超时，重置 workbench 会话后重试…")
+        reset_sessions()
+        time.sleep(2)
+    raise RuntimeError(f"远程命令连续超时：{cmd[:120]}")
 
 
 def upload(local: Path, remote: str) -> None:
@@ -178,23 +228,36 @@ def step_firewall() -> None:
 
 def step_verify() -> bool:
     ok = True
-    health = sh(f"curl -s -m 10 http://127.0.0.1:{PORT}/api/health || echo FAIL")
+    health = _curl_retry(f"http://127.0.0.1:{PORT}/api/health", body=True)
     print(f"[verify] 本机 healthz: {health.strip()[:200]}")
     ok &= '"ok": true' in health.replace("'", '"')
 
-    svc = sh(f"systemctl is-active {SVC}")
-    print(f"[verify] {SVC}: {svc.strip()}")
-    tmr = sh(f"systemctl is-active {SVC}-scheduler.timer")
-    print(f"[verify] {SVC}-scheduler.timer: {tmr.strip()}")
+    svc = sh(f"systemctl is-active {SVC} {SVC}-scheduler.timer").split()
+    print(f"[verify] 服务状态: {svc}")
 
     for url, must in [(f"https://{DOMAIN}/api/health", True),
                       (f"https://{DOMAIN}/", True)] + [(c, False) for c in COHOSTS]:
-        code = sh(f"curl -sk -o /dev/null -w '%{{http_code}}' -m 20 {url}").strip()
+        code = _curl_retry(url).strip()
         flag = "OK" if code == "200" else ("WARN" if not must else "FAIL")
         print(f"[verify] {flag}  {code}  {url}")
         if must and code != "200":
             ok = False
     return bool(ok)
+
+
+def _curl_retry(url: str, body: bool = False, tries: int = 2) -> str:
+    """单 URL 探测，失败重试一次 —— 服务器忙时 workbench 会话可能被拖慢。"""
+    tail = "" if body else "-o /dev/null -w '%{http_code}'"
+    out = ""
+    for _ in range(tries):
+        try:
+            out = sh(f"curl -sk -m 15 {tail} {url} || echo FAIL").strip()
+        except RuntimeError:
+            out = ""
+        if out and out != "FAIL":
+            return out
+        time.sleep(2)
+    return out
 
 
 def step_rollback() -> None:
