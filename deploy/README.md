@@ -107,6 +107,19 @@ sudo -u alpharadar /opt/alpha-radar/.venv/bin/python -m alpharadar.worker --minu
 队列在 `data/alpharadar.db` 的 `tasks` 表；`state` 表里的 `worker` 键存最近一次
 运行状态（速率、进度），看板据此算 ETA。
 
+### 磁盘策略
+
+worker 按品种成批处理，跑完一个品种就删它的行情缓存（映射表保留）。
+全局上限 `--cache-max-gb`（默认 3）超了就按 LRU 回收。
+
+```bash
+# 扩容后：关掉回收，速度提升一个量级
+sudo systemctl edit alpharadar-worker   # 在 ExecStart 末尾加 --keep-cache
+# 或者临时手动跑一轮
+sudo -u alpharadar /opt/alpha-radar/.venv/bin/python -m alpharadar.worker \
+     --minutes 0 --keep-cache
+```
+
 <https://alpha-radar.infiniti.website/runs> —— 调度状态、语料库统计、品种列表、
 结果榜（按 PF 排序，可按品种/策略/周期/市场筛选）、运行记录，以及「立即扫描一轮」按钮。
 
