@@ -31,6 +31,8 @@
   "auto": {
     "_说明": "全市场任务队列配置。worker 按 instruments 表 × strategies × freqs 生成任务，串行执行。",
     "refresh_days": 7,
+    "_strategies说明": "留空或删除 = 自动纳入全部已注册策略（新移植的策略跑一次 --sync 即自动铺满全市场）",
+    "strategies": [],
     "stocks": {
       "enabled": true,
       "_说明": "全 A 股跑日线；分钟级按流动性取前 minute_top_n 只（全市场 1 分钟约 78GB，磁盘放不下）",

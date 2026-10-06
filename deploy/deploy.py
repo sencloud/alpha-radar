@@ -174,9 +174,14 @@ def step_env() -> None:
             raise SystemExit("缺少 .env 或环境变量 TUSHARE_TOKEN")
         local.write_text(f"TUSHARE_TOKEN={token}\n", encoding="utf-8")
     upload(local, f"{APP}/.env")
-    sh(f"chmod 600 {APP}/.env && chown {USER}:{USER} {APP}/.env && "
-       f"grep -c . {APP}/.env")
-    print("[env] .env 已就位（600）")
+    # Windows 写出的 .env 是 CRLF，值里会多一个 \r，导致 token 校验失败
+    # （踩过：手工跑 --sync 报「您的token不对」，systemd 下却正常）。
+    # 统一转成 LF 并去掉行尾空白，再自检 token 能被解析出来。
+    sh(f"sed -i 's/\\r$//' {APP}/.env && "
+       f"chmod 600 {APP}/.env && chown {USER}:{USER} {APP}/.env && "
+       f"grep -c . {APP}/.env && "
+       f"grep -q '^TUSHARE_TOKEN=..*' {APP}/.env && echo 'TUSHARE_TOKEN 已就位'")
+    print("[env] .env 已就位（LF + 600）")
 
 
 def step_systemd() -> None:

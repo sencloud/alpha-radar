@@ -145,10 +145,21 @@ def sync(client: TushareClient | None = None, cfg: dict | None = None,
                              verbose)
     store.init()
     n = store.sync_instruments(rows)
-    # 策略的适用周期白名单要参与任务生成，避免排入必然 0 笔的组合
+    # 策略清单：config.auto.strategies 留空 -> 自动纳入**全部已注册策略**。
+    # 这样新移植一个策略、跑一次 --sync 就会自动铺满全市场，不需要手工改配置。
     from .strategies import get as get_strategy
+    from .strategies import list_strategies
+    # 注意不能用 `or` 兜底：显式写 auto.strategies=[] 表示「全部」，
+    # 而 `or` 会把空列表当假值、回退到顶层那份旧清单（踩过）。
+    auto_keys = auto.get("strategies")
+    if auto_keys is None:
+        auto_keys = cfg.get("strategies") or []
+    keys = list(auto_keys)
+    if not keys:
+        keys = [s.key for s in list_strategies()]
+        verbose(f"  策略清单未指定，自动纳入全部 {len(keys)} 个已注册策略")
     sf: dict[str, tuple] = {}
-    for key in cfg.get("strategies", []):
+    for key in keys:
         try:
             sf[key] = get_strategy(key).freqs
         except KeyError:
