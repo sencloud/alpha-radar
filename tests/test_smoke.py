@@ -528,12 +528,16 @@ def test_autoport_rolls_back_on_gate_failure(monkeypatch):
 
 
 def test_autoport_accepts_good_code(monkeypatch):
-    """一个干净实现应当通过闸门并进入注册表。"""
+    """一个干净实现应当通过闸门并进入注册表。
+
+    这里的 key 刻意跟 sid 无关 —— 修掉的正是「强制模型使用我指定的 key」
+    那个约束（实测 104/162 个被拒都栽在命名上，不是逻辑上）。
+    """
     import alpharadar.porting.autoport as ap
     from alpharadar.strategies import REGISTRY
 
     before = ap.GEN.read_text(encoding="utf-8") if ap.GEN.exists() else None
-    key = "tv_goodgood00"
+    key = "tv_model_picked_this_name"
     good = (f'@register("{key}", "good", defaults={{"n": 20}})\n'
             f'def _{key}(df, p):\n'
             '    c = df["close"].astype(float)\n'
@@ -548,10 +552,11 @@ def test_autoport_accepts_good_code(monkeypatch):
     monkeypatch.setattr(ap.scaffold, "make_worksheet", lambda sid: "fake worksheet")
 
     try:
-        res = ap.port_one({"sid": "PUB;goodgood00", "title": "t",
+        res = ap.port_one({"sid": "PUB;zzzzzzzzzz", "title": "t",
                            "family": "trend", "score": 1}, max_tries=1,
                           verbose=lambda *a: None)
-        assert res["ok"] and res["key"] in REGISTRY
+        assert res["ok"]
+        assert res["key"] == key and key in REGISTRY
     finally:
         if before is None:                                   # 清理到测试前状态
             ap.GEN.unlink(missing_ok=True)

@@ -72,6 +72,8 @@ SYSTEM = f"""你是 Pine Script 到 Python 的量化策略翻译器。把给定�
   request.security / pivothigh 必须按已确认口径改写（右移确认根数）
 - 所有参数从 p 里取，并在 defaults 字典里给出默认值
 - 预热期由 signal_frame 自动处理（默认前 60 根不出信号），你不用自己写
+- @register 的第一个参数（策略 key）用 `tv_` 开头，后面自己起一个不冲突的名字，
+  例如 tv_my_rsi_cross；不要跟已有的内置策略重名（utbot/supertrend/orb 等）
 
 【指标 → 策略的包装器】若原脚本是 indicator（没有 strategy.entry），从中选一个并在注释里写明理由：
 {WRAPPERS_TEXT}
@@ -145,11 +147,12 @@ def port_one(rec: dict, max_tries: int = 2, verbose=print) -> dict:
     """翻译一个脚本；返回 {ok, key, errors}。"""
     sid = rec["sid"]
     worksheet = scaffold.make_worksheet(sid)
-    key = f"tv_{sid.split(';')[-1][:10]}"
-    before_keys = set(REGISTRY)
+    before_registry = dict(REGISTRY)
+    before_keys = set(before_registry)
     msgs = [{"role": "system", "content": SYSTEM},
-            {"role": "user", "content": worksheet}]
+            {"role": "user", "content": f"{worksheet}\n\n【本脚本的 source_sid】{sid}"}]
     last_err = ""
+    key = ""
     for attempt in range(1, max_tries + 1):
         try:
             code = _extract_code(_llm(msgs))
@@ -165,6 +168,27 @@ def port_one(rec: dict, max_tries: int = 2, verbose=print) -> dict:
                      {"role": "user", "content": f"这段代码有语法错误：{exc}。请修正后重新输出完整代码。"}]
             continue
 
+        # key 由模型自己起，只要求 tv_ 前缀且不覆盖内置策略 ——
+        # 原来的实现强制它用我指定的名字，实测 162 个被拒里有 104 个栽在这上面，
+        # 而那是纯粹的命名约定问题，不是策略逻辑问题。
+        m = re.search(r'@register\(\s*["\']([^"\']+)["\']', code)
+        if not m:
+            last_err = "代码里找不到 @register 的 key"
+            msgs += [{"role": "assistant", "content": code},
+                     {"role": "user", "content": "找不到 @register 的第一个参数。请按模板重新输出。"}]
+            continue
+        key = m.group(1)
+        if not re.fullmatch(r"tv_[A-Za-z0-9_]{2,40}", key):
+            last_err = f"key「{key}」不合规：必须以 tv_ 开头（如 tv_my_rsi）"
+            msgs += [{"role": "assistant", "content": code},
+                     {"role": "user", "content": last_err + "。请修正后重新输出。"}]
+            continue
+        if key in before_registry and not key.startswith("tv_"):
+            last_err = f"key「{key}」会覆盖内置策略，请换个名字"
+            msgs += [{"role": "assistant", "content": code},
+                     {"role": "user", "content": last_err + "。请修正后重新输出。"}]
+            continue
+
         old = _append(code, sid)
         try:
             _reload()
@@ -176,10 +200,9 @@ def port_one(rec: dict, max_tries: int = 2, verbose=print) -> dict:
             continue
         if key not in REGISTRY:
             _rollback(old, before_keys)
-            last_err = f"没有注册成 key={key}（@register 的第一个参数必须是这个 key）"
+            last_err = f"代码里没有注册出 key={key} 的策略"
             msgs += [{"role": "assistant", "content": code},
-                     {"role": "user", "content": f"没有看到 key={key} 的注册。"
-                                                 f"@register 的第一个参数必须是 {key}。请修正。"}]
+                     {"role": "user", "content": f"没有看到 key={key} 的注册，请修正。"}]
             continue
 
         r = verify.verify_strategy(key, bars=verify.synth_bars(2000))
