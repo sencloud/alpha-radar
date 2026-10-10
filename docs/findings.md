@@ -5,6 +5,12 @@
 成本：双边 1 跳滑点 + 手续费，逐笔计入。
 
 > 记录规则：**失败也写**。下面每一条都附了可复现的命令。
+>
+> 自 2026-10-10 起，五道闸门由 `alpharadar/judge.py` 按 `config/gates.json` 自动判定，
+> 本文 1–8 条的数字同步在 `docs/archive/curated.json`（对外精选档案的唯一来源）。
+> 第 6、7 条原先用的是 CC BY-NC-SA 4.0 脚本的移植（`false_breakout` / `orb`），
+> 对外档案已改指向按公开思路独立实现的 `breakout_fade` / `orb_classic`，
+> **数字待在生产环境重跑后更新**。
 
 ## 1. UT Bot（趋势族）@5min — 唯一在千笔样本上 PF>1
 
@@ -47,6 +53,8 @@ TP1/TP2/TP3 各平 1/3（1/2/3 ×ATR）：PF 从 0.905 掉到 0.852。
 
 ## 6. 假突破反向（False Breakout）— 失败
 
+> 原创实现：`--strategy breakout_fade`（Turtle Soup 思路，MIT）。下面是旧移植版的数字，待重跑。
+
 ```
 alpharadar run --symbol P.DCE --strategy false_breakout --freq 1min --start 20220101
 ```
@@ -57,6 +65,8 @@ alpharadar run --symbol P.DCE --strategy false_breakout --freq 1min --start 2022
   棕榈油的突破确实偏假，但**假完之后沿原方向延续**，不是回头。
 
 ## 7. 开盘区间突破（ORB）— 失败
+
+> 原创实现：`--strategy orb_classic`（Crabel ORB 思路，MIT）。下面是旧移植版（`orb`）的数字，待重跑。
 
 - @5min：1223 笔、胜率 **49.3%（全场最高）**、PF 0.889、**0/5 年为正**
 - 失败原因：赔率结构不成立。突破后回撤到对侧止损太常见，

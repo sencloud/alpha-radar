@@ -9,19 +9,28 @@
     GET  /report/<名称> 查看已生成的 HTML 报告
     GET  /api/health    健康检查（供 Caddy / 监控用）
     GET  /api/strategies 策略清单 JSON
+    GET  /api/falsification  证伪档案（五道闸门判定结果，只读、免鉴权；
+                         契约见 docs/falsification-export.md）
     GET  /cover.png     推广封面
+    POST /runs/trigger   手动扫描一轮（需管理口令）
+    POST /scripts/harvest 手动采集一次（需管理口令）
 
 安全与配额（公开站点必须考虑）：
     - 品种默认只允许 universe.PRESETS 里的白名单；设 ALPHARADAR_ALLOW_ANY=1 才放开
     - 策略只允许注册表里的 key
     - 全局同一时刻只跑一个任务，且两次任务之间有冷却
     - 报告文件名做白名单校验，禁止路径穿越
+    - 会触发后台任务的管理 POST（/runs/trigger、/scripts/harvest）必须带
+      ALPHARADAR_ADMIN_TOKEN：请求头 X-Admin-Token / Authorization: Bearer，
+      或表单字段 token。环境变量没配时一律拒绝（fail closed）
 """
 
 from __future__ import annotations
 
+import hmac
 import html
 import json
+import logging
 import os
 import re
 import threading
@@ -47,6 +56,59 @@ _lock = threading.Lock()
 _jobs: dict[str, dict] = {}
 _last_run = 0.0
 NAME_RE = re.compile(r"^[A-Za-z0-9._\-]+$")
+
+log = logging.getLogger("alpharadar.web")
+ADMIN_ENV = "ALPHARADAR_ADMIN_TOKEN"
+MAX_FORM_BYTES = 64 * 1024
+FALSIFY_TTL = float(os.environ.get("ALPHARADAR_FALSIFY_TTL", "300"))
+FALSIFY_LIMIT = int(os.environ.get("ALPHARADAR_FALSIFY_LIMIT", "2000"))
+_fx_cache: dict[tuple, tuple[float, bytes]] = {}
+_fx_lock = threading.Lock()
+
+
+def admin_token() -> str:
+    """每次请求时读环境变量（改了 .env 重启即可，测试也能直接 monkeypatch）。"""
+    return os.environ.get(ADMIN_ENV, "").strip()
+
+
+def check_admin(headers, form: dict) -> tuple[bool, str]:
+    """校验管理口令，返回 (是否放行, 拒绝原因)。
+
+    口令来源（任一）：X-Admin-Token 头、Authorization: Bearer <token>、表单字段 token。
+    未配置 ALPHARADAR_ADMIN_TOKEN 时 fail closed：一律拒绝并记警告。
+    """
+    want = admin_token()
+    if not want:
+        log.warning("%s 未配置，管理 POST 已拒绝（fail closed）", ADMIN_ENV)
+        print(f"[warn] {ADMIN_ENV} 未配置，管理 POST 已拒绝", flush=True)
+        return False, "服务端未配置管理口令，管理操作已停用"
+    got = (headers.get("X-Admin-Token") or "").strip()
+    if not got:
+        auth = headers.get("Authorization") or ""
+        if auth[:7].lower() == "bearer ":
+            got = auth[7:].strip()
+    if not got:
+        got = ((form.get("token") or [""])[0]).strip()
+    if got and hmac.compare_digest(got.encode("utf-8"), want.encode("utf-8")):
+        return True, ""
+    return False, "管理口令错误或缺失"
+
+
+def falsification_json(include_insufficient: bool = False,
+                       limit: int | None = None) -> bytes:
+    """/api/falsification 的响应体，按参数缓存 FALSIFY_TTL 秒（全表判定较重）。"""
+    key = (include_insufficient, limit)
+    now = time.time()
+    with _fx_lock:
+        hit = _fx_cache.get(key)
+        if hit and now - hit[0] < FALSIFY_TTL:
+            return hit[1]
+    from .falsify import build_export
+    payload = build_export(include_insufficient=include_insufficient, limit=limit)
+    body = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    with _fx_lock:
+        _fx_cache[key] = (now, body)
+    return body
 
 
 # ==================== 页面 ====================
@@ -160,7 +222,8 @@ def _index() -> bytes:
 <p class="note">源码：<a href="https://github.com/sencloud/alpha-radar">
 github.com/sencloud/alpha-radar</a>
 &nbsp;·&nbsp; <a href="/api/health">/api/health</a>
-&nbsp;·&nbsp; <a href="/api/strategies">/api/strategies</a></p>
+&nbsp;·&nbsp; <a href="/api/strategies">/api/strategies</a>
+&nbsp;·&nbsp; <a href="/api/falsification">/api/falsification</a></p>
 """
     return _page("alpha-radar · 策略雷达", body)
 
@@ -286,6 +349,8 @@ def _scripts_page(q: dict) -> bytes:
 &nbsp;·&nbsp; 本轮新下载 {_ch(hv, 'downloaded')}
 &nbsp;·&nbsp; 采集由系统定时任务驱动；也可以手动补一次：
 <form method="post" action="/scripts/harvest" style="display:inline">
+<input type="password" name="token" placeholder="管理口令" autocomplete="current-password"
+ style="min-width:110px;padding:4px 8px;font-size:13px">
 <button type="submit" style="padding:4px 12px;font-size:13px">立即采集</button></form></p>
 
 <form class="filters" method="get" action="/scripts">
@@ -488,6 +553,8 @@ def _runs_page(q: dict) -> bytes:
 &nbsp;·&nbsp; 上次扫描：{html.escape(str((store.get_state('last_cycle') or {}).get('ts') or '—'))}
 &nbsp;·&nbsp; 扫描由 systemd timer 驱动，失败会自动跳过并在运行记录里留痕</p>
 <form method="post" action="/runs/trigger">
+  <div><label>管理口令</label><input type="password" name="token"
+   autocomplete="current-password"></div>
   <button type="submit">立即扫描一轮（限量）</button>
   <span class="note">手动触发只跑最旧的几个组合，不会打断定时任务</span>
 </form>
@@ -639,6 +706,19 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/strategies":
             return self._json([{"key": s.key, "name": s.name, "source": s.source,
                                 "license": s.license} for s in catalog()])
+        if p == "/api/falsification":
+            q = parse_qs(u.query)
+            inc = {x.strip() for v in q.get("include", []) for x in v.split(",")}
+            try:
+                lim = int((q.get("limit") or [FALSIFY_LIMIT])[0])
+            except ValueError:
+                return self._json({"error": "limit 必须是整数"}, 400)
+            lim = max(0, min(lim, 20000))
+            try:
+                body = falsification_json("insufficient" in inc, lim)
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"[:300]}, 500)
+            return self._send(200, body, "application/json; charset=utf-8")
         if p == "/runs":
             try:
                 return self._send(200, _runs_page(parse_qs(u.query)))
@@ -681,14 +761,23 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:                         # noqa: N802
         global _last_run
         p = urlparse(self.path).path
-        if p == "/runs/trigger":
-            return self._trigger_cycle()
-        if p == "/scripts/harvest":
-            return self._trigger_harvest()
-        if p != "/run":
+        if p not in ("/run", "/runs/trigger", "/scripts/harvest"):
             return self._send(404, b"not found")
-        n = int(self.headers.get("Content-Length", 0))
-        form = parse_qs(self.rfile.read(n).decode("utf-8", "replace"))
+        try:
+            n = int(self.headers.get("Content-Length", 0) or 0)
+        except ValueError:
+            n = 0
+        if n < 0 or n > MAX_FORM_BYTES:
+            return self._send(413, b"payload too large")
+        form = parse_qs(self.rfile.read(n).decode("utf-8", "replace")) if n else {}
+        if p in ("/runs/trigger", "/scripts/harvest"):
+            ok, why = check_admin(self.headers, form)
+            if not ok:
+                back = "/runs" if p == "/runs/trigger" else "/scripts"
+                return self._send(403, _page("拒绝", f"<h1>需要管理口令</h1>"
+                                             f"<p class='note'>{html.escape(why)}</p>"
+                                             f"<p><a href='{back}'>← 返回</a></p>"))
+            return self._trigger_cycle() if p == "/runs/trigger" else self._trigger_harvest()
         symbol = (form.get("symbol") or [""])[0]
         strategy = (form.get("strategy") or [""])[0]
         freq = (form.get("freq") or ["5min"])[0]
@@ -723,6 +812,9 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     for d in (config.CACHE_DIR, config.REPORT_DIR):
         d.mkdir(parents=True, exist_ok=True)
+    if not admin_token():
+        print(f"[warn] 未配置 {ADMIN_ENV}：/runs/trigger 与 /scripts/harvest 将拒绝所有请求",
+              flush=True)
     srv = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"alpha-radar web 已启动 http://{HOST}:{PORT}  "
           f"(allow_any={ALLOW_ANY}, cooldown={COOLDOWN}s)", flush=True)

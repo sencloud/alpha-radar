@@ -28,6 +28,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import config, store
+from .judge import result_extras
 from .metrics import summarize
 from .pipeline import run_one, save_result
 from .tushare_client import TushareClient
@@ -241,6 +242,7 @@ def _cycle_inner(cfg, force, limit, only_symbol, only_strategy, client, out,
                            ret_dd=None if s["笔数"] == 0 else round(s["收益回撤比"], 2),
                            pos_years=s["正年数"], years=s["年数"],
                            report=html.name)
+                row.update(result_extras(res))
                 n_ok += 1
                 out(f"  [{i}/{len(todo)}] {sym} {strat} {freq} → "
                     f"{s['笔数']} 笔 PF {s['PF']:.2f} 均点 {s['均点']:+.2f}")

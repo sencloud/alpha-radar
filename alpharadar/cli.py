@@ -5,6 +5,7 @@
   list      列出内置策略
   run       单品种 × 单策略回测（并输出 HTML 报告）
   matrix    多品种 × 多策略 × 多周期排行榜
+  falsify-export  按五道闸门判定结果库 + 精选档案，导出对外证伪档案 JSON
 """
 
 from __future__ import annotations
@@ -76,7 +77,34 @@ def main(argv: list[str] | None = None) -> int:
     m.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
     m.add_argument("--out", default=None, help="结果 CSV 路径")
 
+    fx = sub.add_parser("falsify-export",
+                        help="导出证伪档案 JSON（契约见 docs/falsification-export.md）")
+    fx.add_argument("--out", required=True, help="输出文件路径；写 - 输出到 stdout")
+    fx.add_argument("--include-insufficient", action="store_true",
+                    help="同时导出样本不足（insufficient）的条目")
+    fx.add_argument("--limit", type=int, default=None,
+                    help="自动判定条目的上限（精选档案不受限）")
+    fx.add_argument("--db", default=None, help="结果库路径（默认 data/alpharadar.db）")
+
     args = ap.parse_args(argv)
+
+    if args.cmd == "falsify-export":
+        import json
+        from pathlib import Path
+        from .falsify import build_export, write_export
+        kw = {"include_insufficient": args.include_insufficient, "limit": args.limit,
+              "db_path": Path(args.db) if args.db else None}
+        if args.out == "-":
+            print(json.dumps(build_export(**kw), ensure_ascii=False, indent=2,
+                             allow_nan=False))
+            return 0
+        payload = write_export(Path(args.out), **kw)
+        s = payload["summary"]
+        print(f"[ok] {args.out}  阈值 {payload['threshold_version']}  "
+              f"共 {s['archive_total']} 条（精选 {s['curated']} / 自动 {s['auto']}）"
+              f"  结论分布 {s['by_verdict']}  许可排除 {s['excluded_license']}"
+              f"  隐藏样本不足 {s['insufficient_hidden']}", file=sys.stderr)
+        return 0
 
     if args.cmd == "harvest":
         terms = tuple(t.strip() for t in args.terms.split(",") if t.strip()) or DEFAULT_TERMS

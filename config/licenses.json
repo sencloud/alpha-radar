@@ -1,0 +1,7 @@
+{
+  "_说明": "对外导出（/api/falsification、falsify-export）与「跑一次证伪」可选范围的许可过滤规则。判定顺序：策略 @register 的 license 字段 → 语料库里原 Pine 源码头部的许可声明 → 下面的作者兜底名单。任一来源判为非商用 / 禁止再分发，就排除（取最严）。",
+  "unknown_policy": "allow",
+  "_unknown_policy_说明": "allow = 许可无法判定的策略照常导出，但 license_status=unknown（TradingView 开源脚本未声明许可时默认 MPL-2.0）；改成 deny 则一律排除。",
+  "nc_authors": ["LuxAlgo", "BigBeluga", "Zeiierman", "ChartPrime", "AlgoAlpha"],
+  "_nc_authors_说明": "仅在 license 字段与源码头都无法判定时使用的保守兜底：这些作者的公开脚本普遍使用 CC BY-NC-SA 4.0。"
+}

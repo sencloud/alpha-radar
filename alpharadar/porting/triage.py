@@ -136,6 +136,7 @@ def triage(force: bool = False, verbose=print) -> dict:
 
 
 def port_stats() -> dict:
+    store.init()                 # 新库还没有 ports 表时不至于直接报错（幂等）
     with store.connect() as con:
         by = con.execute("SELECT status, COUNT(*) n FROM ports GROUP BY status").fetchall()
         fam = con.execute("SELECT family, COUNT(*) n FROM ports "

@@ -22,6 +22,7 @@ from datetime import datetime
 from . import config
 from . import store
 from .instruments import sync as sync_instruments
+from .judge import result_extras
 from .metrics import summarize
 from .pipeline import run_one, save_result
 from .tushare_client import TushareClient
@@ -161,6 +162,7 @@ def run_worker(cfg: dict, minutes: float = 60.0, limit: int = 0,
                            max_dd=round(s["最大回撤"], 0),
                            ret_dd=None if n == 0 else round(s["收益回撤比"], 2),
                            pos_years=s["正年数"], years=s["年数"], report=html.name)
+                row.update(result_extras(res))
                 store.add_result(row)
                 store.finish_task(t["id"], "ok", requeue_days=requeue_days)
                 n_ok += 1
