@@ -60,6 +60,10 @@ def run_one(symbol: str, strategy: str, freq: str = "5min",
     p = make_params(strategy, freq, params)
     bars, inst = build_bars(symbol, freq, start, end or _today(), p,
                             client=client, verbose=verbose)
+    # 判定层的尺度闸门要用「回测窗口内的平均振幅 / 均价」；worker 跑完就删缓存，
+    # 只能在这里顺手记下（judge.result_extras 会把它们写进结果库）
+    from .judge import bar_stats
+    p["_avg_amp"], p["_avg_px"] = bar_stats(bars)
     strat = get_strategy(strategy)
     sig_df = strat.fn(bars, p)
     return run_strategy(sig_df, inst, p, capital)

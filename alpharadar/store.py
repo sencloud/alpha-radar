@@ -71,10 +71,16 @@ CREATE TABLE IF NOT EXISTS ports(
 CREATE INDEX IF NOT EXISTS idx_ports_status ON ports(status, score);
 """
 
+# 判定层（judge.py）需要的原料，后加的列：旧库在 init() 时自动 ALTER TABLE 补上。
+#   avg_amp  回测窗口内平均单根振幅（报价点）   avg_px  平均收盘价
+#   cost_rt  往返成本（报价点）                 yearly  逐年盈亏 JSON [[年, 盈亏], ...]
+EXTRA_RESULT_COLS = {"avg_amp": "REAL", "avg_px": "REAL", "cost_rt": "REAL",
+                     "yearly": "TEXT"}
+
 RESULT_COLS = ("run_id", "ts", "symbol", "name", "market", "strategy", "freq",
                "start", "end", "trades", "win_rate", "pf", "avg_points",
                "total_pnl", "max_dd", "ret_dd", "pos_years", "years",
-               "status", "error", "report")
+               "status", "error", "report", *EXTRA_RESULT_COLS)
 
 
 @contextmanager
@@ -93,6 +99,10 @@ def connect(path: Path | None = None):
 def init(path: Path | None = None) -> None:
     with connect(path) as con:
         con.executescript(SCHEMA)
+        have = {r["name"] for r in con.execute("PRAGMA table_info(results)")}
+        for col, typ in EXTRA_RESULT_COLS.items():
+            if col not in have:
+                con.execute(f"ALTER TABLE results ADD COLUMN {col} {typ}")
 
 
 # ---------- runs ----------
