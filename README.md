@@ -79,11 +79,15 @@ alpharadar matrix --symbols P.DCE,Y.DCE,M.DCE \
 | `chandelier` | Chandelier Exit | TradingView @everget | MIT |
 | `orb` | 开盘区间突破 | TradingView @LuxAlgo | CC BY-NC-SA 4.0 |
 | `false_breakout` | 假突破反向 | TradingView @Zeiierman | CC BY-NC-SA 4.0 |
+| `orb_classic` | 开盘区间突破（原创实现） | 原创实现，思路来源 Toby Crabel (1990) | MIT |
+| `breakout_fade` | 假突破反向（原创实现） | 原创实现，思路来源 Raschke & Connors《Street Smarts》Turtle Soup | MIT |
 | `vreversal` | 冰点反转 | 原创 | MIT |
 | `ema_cross` | 双均线交叉（基线） | 通用 | MIT |
 
 移植脚本保留了原作者与许可声明。**CC BY-NC-SA 许可禁止商业使用**，
-商业场景请自行确认许可或改用 MIT/MPL 来源。
+商业场景请自行确认许可或改用 MIT/MPL 来源。`orb` / `false_breakout` 只留作研究对照；
+对外使用的是 `alpharadar/strategies/cleanroom.py` 里按公开交易思路独立实现的
+`orb_classic` / `breakout_fade`（未参照任何 TradingView 源码）。
 
 ## 两只手：确定性内核 + agent 大脑
 

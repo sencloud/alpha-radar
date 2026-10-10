@@ -8,6 +8,7 @@ from ..config import DATA_DIR
 from .base import (REGISTRY, Strategy, get, list_strategies,      # noqa: F401
                    register, signal_frame)
 from . import library                                              # noqa: F401
+from . import cleanroom                                            # noqa: F401
 
 # 自动移植生成的策略放在 data/ 下，**不在源码树里** ——
 # 源码树每次部署都会被覆盖，生成物放进去会被清掉（踩过：两个已通过校验的
@@ -37,4 +38,4 @@ def load_generated() -> int:
 load_generated()
 
 __all__ = ["REGISTRY", "Strategy", "get", "list_strategies", "register",
-           "signal_frame", "library"]
+           "signal_frame", "library", "cleanroom"]

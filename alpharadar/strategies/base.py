@@ -30,6 +30,7 @@ class Strategy:
                                          # 日内形态配日线数据必然 0 笔，
                                          # scheduler.build_cells 会跳过这类组合
     source_sid: str = ""                 # 移植来源：语料库脚本 id（可追溯到原作者）
+    origin: str = ""                     # 思路来源（原创 / clean-room 实现时写明参考的公开思路）
 
 
 REGISTRY: dict[str, Strategy] = {}
@@ -37,12 +38,12 @@ REGISTRY: dict[str, Strategy] = {}
 
 def register(key: str, name: str, source: str = "", license: str = "",
              notes: str = "", defaults: dict | None = None, freqs: tuple = (),
-             source_sid: str = ""):
+             source_sid: str = "", origin: str = ""):
     def deco(fn):
         REGISTRY[key] = Strategy(key=key, name=name, fn=fn, source=source,
                                  license=license, notes=notes,
                                  defaults=dict(defaults or {}), freqs=tuple(freqs),
-                                 source_sid=source_sid)
+                                 source_sid=source_sid, origin=origin)
         return fn
     return deco
 

@@ -16,7 +16,9 @@
     "orb",
     "vreversal",
     "false_breakout",
-    "ema_cross"
+    "ema_cross",
+    "orb_classic",
+    "breakout_fade"
   ],
   "futures": {
     "freqs": ["5min", "1d"],
