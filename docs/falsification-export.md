@@ -6,8 +6,23 @@ alpha-radar 把「结果库里的每条回测」和「手写的精选档案」�
 | 入口 | 用法 |
 |---|---|
 | CLI | `alpharadar falsify-export --out falsification.json [--include-insufficient] [--limit N] [--db path]`；`--out -` 输出到 stdout |
-| HTTP | `GET /api/falsification[?include=insufficient][&limit=N]`，只读、免鉴权，进程内缓存 `ALPHARADAR_FALSIFY_TTL` 秒（默认 300）|
-| 代码 | `alpharadar.falsify.build_export(...) -> dict` |
+| 预生成 | `alpharadar falsify-pregen [--dir data] [--limit N] [--db path]`：一次判定，原子写 `data/falsification.json`（主视图）与 `data/falsification.insufficient.json`（含样本不足）；线上由 `alpharadar-falsify.timer` 每小时跑一次 |
+| HTTP | `GET /api/falsification[?include=insufficient][&limit=N]`，只读、免鉴权，**只返回预生成文件，绝不在请求里判定**；文件还没生成时 `503 {"error":"not_ready"}`（带 `Retry-After: 60`）|
+| 代码 | `alpharadar.falsify.build_export(...) -> dict`；`build_views(...) -> (主视图, 含样本不足视图)`；`write_views(dir)` |
+
+### HTTP 接口细节（预生成）
+
+- 数据新鲜度：最多落后一小时（timer 周期）。`generated_at` 是生成时间，响应头带
+  `Last-Modified` 与 `ETag`，支持 `If-None-Match` → `304`；`Cache-Control: public, max-age=60`。
+- `limit`：预生成文件已按 `ALPHARADAR_FALSIFY_LIMIT`（默认 2000）截断自动条目（按结论排序后保留前 N 条，
+  精选档案不受限）。`?limit=N` 只能**再往小截**（N 大于文件里的条数时原样返回），
+  不再支持「最大 20000」的现场扩容。要更多条目，调大环境变量后等下一轮生成。
+- 为什么不现场算：线上结果库每个 (品种, 策略, 周期) 的最新结果有 11 万+ 条，绝大多数是加列之前跑的旧结果，
+  要回读逐笔 CSV 与行情缓存；以前每次缓存过期都在 web 进程里全表重判，跑 15 分钟以上、内存涨到 1.1 GB。
+- 生成过程的资源约束：结果按 id 分批流式读取；样本闸门没过的条目（结论已定为 insufficient）
+  不再回读行情缓存与逐笔 CSV，它们的尺度闸门 `note` 为「样本不足，未重算尺度」；
+  行情缓存重算尺度按 (品种, 周期, 起点) 记忆化；逐笔 CSV 用 csv 流式读两列；
+  每个视图只在内存里保留排序靠前的 limit 条。systemd 里 `Nice=15`、`MemoryMax=800M`、20 分钟超时。
 
 `schema_version` 目前是 `1`。**只增不改**：新增字段向后兼容；改字段含义或删字段时升版本号。
 
@@ -62,6 +77,8 @@ alpha-radar 把「结果库里的每条回测」和「手写的精选档案」�
 | `unregistered` | 结果库里有、但策略已不在注册表（无法核许可）而跳过的条目数 |
 | `override_applied` / `override_ignored` | 人工覆盖生效 / 被忽略的条数 |
 | `truncated` | 因 `limit` 截掉的自动条目数 |
+| `auto_judged` | 本轮判定的自动条目总数（许可 / 注册过滤之后、截断之前）|
+| `auto_by_verdict` | 截断前全量自动条目的结论分布（`by_verdict` 只数本次输出的条目）|
 
 ## 档案条目（archive[]）
 
@@ -385,5 +402,5 @@ alpha-radar 把「结果库里的每条回测」和「手写的精选档案」�
 
 1. 改 `config/gates.json` 的数字，**同时改 `threshold_version`**；
 2. 跑 `pytest`（`tests/test_falsification.py` 锁住了当前阈值，按需同步）；
-3. 部署后 `/api/falsification` 在缓存过期后自动用新阈值重判，客户端可以用
+3. 部署后下一轮预生成（每小时，部署时会立即后台跑一次）自动用新阈值重判，客户端可以用
    `threshold_version` + `judged_at` 判断结论变化是因为阈值还是因为新数据。

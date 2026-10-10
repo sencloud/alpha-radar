@@ -6,6 +6,7 @@
   run       单品种 × 单策略回测（并输出 HTML 报告）
   matrix    多品种 × 多策略 × 多周期排行榜
   falsify-export  按五道闸门判定结果库 + 精选档案，导出对外证伪档案 JSON
+  falsify-pregen  预生成 /api/falsification 的两个视图文件（systemd timer 定时调用）
 """
 
 from __future__ import annotations
@@ -86,7 +87,37 @@ def main(argv: list[str] | None = None) -> int:
                     help="自动判定条目的上限（精选档案不受限）")
     fx.add_argument("--db", default=None, help="结果库路径（默认 data/alpharadar.db）")
 
+    fp = sub.add_parser("falsify-pregen",
+                        help="预生成 data/falsification.json 与 falsification.insufficient.json")
+    fp.add_argument("--dir", default=None, help="输出目录（默认 data/，即 ALPHARADAR_DATA）")
+    fp.add_argument("--limit", type=int, default=None,
+                    help="每个视图自动条目上限（默认 ALPHARADAR_FALSIFY_LIMIT，2000；-1 不限）")
+    fp.add_argument("--db", default=None, help="结果库路径（默认 data/alpharadar.db）")
+
     args = ap.parse_args(argv)
+
+    if args.cmd == "falsify-pregen":
+        import time
+        from pathlib import Path
+        from .falsify import DEFAULT_LIMIT, view_path, write_views
+        t0 = time.time()
+        lim = DEFAULT_LIMIT if args.limit is None else args.limit
+        out_dir = Path(args.dir) if args.dir else None
+        main_v, full_v = write_views(out_dir, limit=None if lim < 0 else lim,
+                                     db_path=Path(args.db) if args.db else None)
+        s = main_v["summary"]
+        peak = ""
+        try:
+            import resource
+            peak = f"  峰值内存 {resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024:.0f} MB"
+        except ImportError:                             # Windows 没有 resource
+            pass
+        print(f"[ok] {view_path(False, out_dir)} + {view_path(True, out_dir).name}  "
+              f"用时 {time.time() - t0:.1f}s{peak}  判定 {s['auto_judged']} 条"
+              f"  主视图 {s['archive_total']} 条（精选 {s['curated']} / 自动 {s['auto']}，"
+              f"截断 {s['truncated']}）  含样本不足视图 {full_v['summary']['archive_total']} 条"
+              f"  全量结论 {s['auto_by_verdict']}", file=sys.stderr, flush=True)
+        return 0
 
     if args.cmd == "falsify-export":
         import json

@@ -1,0 +1,17 @@
+# 每小时预生成一次证伪档案（开机 5 分钟后先跑一次）。
+#
+# 改频率：sudo systemctl edit alpharadar-falsify.timer
+# 看下次触发：systemctl list-timers alpharadar-falsify.timer
+
+[Unit]
+Description=alpha-radar falsification pre-generation timer (hourly)
+
+[Timer]
+OnBootSec=5min
+OnCalendar=*-*-* *:41:00
+RandomizedDelaySec=300
+Persistent=true
+Unit=alpharadar-falsify.service
+
+[Install]
+WantedBy=timers.target

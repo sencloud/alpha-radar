@@ -117,7 +117,9 @@ def _fut_minutes(cache: Path, mapping: pd.DataFrame, freq: str) -> pd.DataFrame:
         f = cache / f"{code}_ft_mins_{freq}.csv"
         if not f.exists():
             continue
-        df = pd.read_csv(f, parse_dates=["trade_time"])
+        # 只读需要的列：分钟 CSV 动辄几十 MB，多读 open/vol/oi 只是白占内存
+        df = pd.read_csv(f, usecols=["trade_time", "high", "low", "close"],
+                         parse_dates=["trade_time"])
         day = df["trade_time"].dt.strftime("%Y%m%d").to_numpy()
         idx = np.searchsorted(cal, day, side="right")
         nxt = np.where(idx < len(cal), cal[np.minimum(idx, len(cal) - 1)], day)
@@ -205,6 +207,35 @@ def yearly_from_trades(trades: pd.DataFrame) -> list[list]:
     yr = (trades.assign(_y=trades["日期"].astype(str).str[:4])
           .groupby("_y")["净利"].sum())
     return [[str(y), round(float(v), 0)] for y, v in yr.items()]
+
+
+def yearly_from_trades_csv(path: Path) -> list[list] | None:
+    """逐笔明细 CSV → [[年, 盈亏], ...]，流式只读「日期」「净利」两列。
+
+    导出时旧结果（加 yearly 列之前跑的）要回读报告目录里的 *.trades.csv，
+    线上一次导出要读几万个文件：用 pandas 每个文件都建一张整表，又慢又吃内存。
+    这里逐行累加，内存只与年份数有关。读不了返回 None。
+    """
+    import csv
+    try:
+        with open(path, encoding="utf-8-sig", newline="") as fh:
+            rd = csv.reader(fh)
+            head = next(rd, None)
+            if not head or "日期" not in head or "净利" not in head:
+                return []
+            i_d, i_p = head.index("日期"), head.index("净利")
+            acc: dict[str, float] = {}
+            for row in rd:
+                if len(row) <= max(i_d, i_p):
+                    continue
+                v = _num(row[i_p])
+                if v is None:
+                    continue
+                y = row[i_d][:4]
+                acc[y] = acc.get(y, 0.0) + v
+    except (OSError, UnicodeDecodeError, csv.Error):
+        return None
+    return [[y, round(float(acc[y]), 0)] for y in sorted(acc)]
 
 
 def full_years(start: str | None, end: str | None) -> list[int]:
