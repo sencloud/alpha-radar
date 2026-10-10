@@ -54,6 +54,43 @@ python deploy\deploy.py --steps upload,systemd,verify
 | firewall | 确认本机 80/443 放行（云安全组需另配） |
 | verify | 本机 /healthz + 域名 HTTPS + 两个邻居站点 |
 
+## 管理口令（必配）与证伪档案接口
+
+`POST /runs/trigger`（立即扫描）和 `POST /scripts/harvest`（立即采集）会在服务器上
+起后台任务，以前任何人都能触发。现在必须带管理口令：
+
+- 口令放在 `.env` 的 `ALPHARADAR_ADMIN_TOKEN`（`deploy.py --steps env` 会把本地
+  `.env` 传上去，权限 600；`alpharadar.service` 通过 `EnvironmentFile` 读取）；
+- 调用方式任选：请求头 `X-Admin-Token: <口令>`、`Authorization: Bearer <口令>`，
+  或网页表单里的「管理口令」输入框（字段名 `token`）；
+- **没配置口令时这两个 POST 一律 403（fail closed）**，web 启动日志和每次被拒都会打
+  `[warn] ALPHARADAR_ADMIN_TOKEN 未配置` —— 上线后在 journalctl 里看到这行就说明漏配了。
+
+```powershell
+# 1. 本地 .env 里加一行（生成随机口令）
+python -c "import secrets;print('ALPHARADAR_ADMIN_TOKEN=' + secrets.token_urlsafe(32))" >> .env
+# 2. 上传代码 + .env，重启服务
+python deploy\deploy.py --steps pack,upload,env,systemd,worker,verify
+# 3. 验收：不带口令必须 403，带口令 303
+& $w exec -i i-mj758zcz8k917p3ppsuj -c "curl -s -o /dev/null -w '%{http_code}' -X POST localhost:8901/runs/trigger"
+```
+
+`GET /api/falsification` 是只读、免鉴权的证伪档案接口（给 aiquant 后端拉取），
+默认不含「样本不足」条目，`?include=insufficient` 才返回；结果在进程内缓存
+`ALPHARADAR_FALSIFY_TTL` 秒（默认 300），自动条目上限 `ALPHARADAR_FALSIFY_LIMIT`
+（默认 2000，可用 `?limit=` 覆盖，最大 20000）。契约见 `docs/falsification-export.md`。
+也可以离线导出：
+
+```bash
+sudo -u alpharadar /opt/alpha-radar/.venv/bin/alpharadar falsify-export \
+     --out /opt/alpha-radar/data/falsification.json
+```
+
+结果库在升级后第一次 `store.init()` 时会自动补四列（`avg_amp / avg_px / cost_rt /
+yearly`，判定层要用）。旧结果没有这几列：尺度闸门会尝试用本机行情缓存重算，
+分年闸门会回退到报告目录里的逐笔 CSV，都拿不到的条目判为「样本不足（数据缺失）」，
+等 worker 下一轮重跑（7 天轮转）后自然补齐。
+
 ## 定时扫描（无人值守）
 
 `alpharadar-scheduler.timer` 每 6 小时触发一次 `alpharadar-scheduler.service`：

@@ -5,6 +5,10 @@
 #   sudo systemctl daemon-reload && sudo systemctl enable --now alpharadar
 #
 # 监听 127.0.0.1:8901，由 Caddy 反向代理（见 deploy/alpharadar.caddy）。
+#
+# 环境变量来自 /opt/alpha-radar/.env（EnvironmentFile），其中必须有：
+#   ALPHARADAR_ADMIN_TOKEN=<随机长串>   # 管理 POST（立即扫描 / 立即采集）的口令；
+#                                        # 不配置则这两个操作一律 403（fail closed）
 # 本机同时跑 lastdays(8787) 与 infiniti(3100)，端口不要撞。
 
 [Unit]
