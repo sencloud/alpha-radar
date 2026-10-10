@@ -1,0 +1,361 @@
+{
+  "_说明": "精选证伪档案（手写机制）的唯一来源。数字原样来自 docs/findings.md；未记录的字段为 null（不再用 0 占位）。editor_verdict 是人工结论，导出时 verdict 由判定层按 config/gates.json 重新计算（finding 除外）。aiquant 的 tools/strategy-mvp/build_falsification_data.py 里的 ARCHIVE 已迁移到这里。",
+  "updated_at": "2026-10-10",
+  "archive": [
+    {
+      "id": "utbot-5min",
+      "strategy": "UT Bot",
+      "strategy_key": "utbot",
+      "family": "趋势跟随",
+      "family_key": "trend",
+      "source": "TradingView @QuantNomad",
+      "origin": "",
+      "license": "—",
+      "symbol": "P.DCE",
+      "name": "棕榈油",
+      "asset_class": "futures",
+      "freq": "5min",
+      "editor_verdict": "reject",
+      "headline": "千笔样本里唯一 PF > 1，但利润全在 2022 一年",
+      "metrics": {
+        "trades": 1060,
+        "win": 0.427,
+        "pf": 1.05,
+        "avg_points": 1.06,
+        "max_dd_pct": -0.185,
+        "pnl_dd": 0.45,
+        "positive_years": 2,
+        "years": 5,
+        "total_pnl": 11227,
+        "max_dd": null
+      },
+      "few": "1060 笔 / 胜率 42.7% / PF 1.05 / 每手 +1.06 点",
+      "yearly": [
+        [
+          "2022",
+          23554
+        ],
+        [
+          "2023",
+          5915
+        ],
+        [
+          "2024",
+          -2666
+        ],
+        [
+          "2025",
+          -3885
+        ],
+        [
+          "2026",
+          -11691
+        ]
+      ],
+      "mechanism": "全部利润来自 2022 年（印尼出口禁令年）。最近三年连亏，收益回撤比 0.45。它证明了 5 分钟尺度上「宽跟踪止损 + 趋势跟随」这个结构本身有微弱优势，值得继续挖 —— 但这条参数不能实盘。",
+      "command": "alpharadar run --symbol P.DCE --strategy utbot --freq 5min --start 20220101",
+      "window": {
+        "start": "20220101",
+        "end": "20261009"
+      },
+      "scale": {
+        "ratio": 0.2216,
+        "source": "P.DCE 5min 实测：往返成本 4.5 点 ÷ 平均振幅 20.31 点（2026-10-10 cost_scales）"
+      },
+      "flags": []
+    },
+    {
+      "id": "utbot-regime",
+      "strategy": "UT Bot + ER 体制闸门",
+      "strategy_key": "utbot",
+      "family": "趋势跟随 + 体制过滤",
+      "family_key": "trend",
+      "source": "TradingView @QuantNomad + 原创闸门",
+      "origin": "",
+      "license": "—",
+      "symbol": "P.DCE",
+      "name": "棕榈油",
+      "asset_class": "futures",
+      "freq": "5min",
+      "editor_verdict": "pending",
+      "headline": "目前最好的一档：PF 1.578、正年数 4/5，但只剩 55 笔",
+      "metrics": {
+        "trades": 55,
+        "win": null,
+        "pf": 1.578,
+        "avg_points": 13.75,
+        "max_dd_pct": null,
+        "pnl_dd": null,
+        "positive_years": 4,
+        "years": 5,
+        "total_pnl": null,
+        "max_dd": null
+      },
+      "few": "55 笔 / PF 1.578 / 每手 +13.75 点 / 正年数 4/5",
+      "yearly": [],
+      "mechanism": "加一个 ER（效率系数）闸门把体制不对的时段整段跳过，PF 从 1.043 抬到 1.578、正年数从 2/5 抬到 4/5 —— 比两轮入场调优加起来都有效。代价是样本只剩 55 笔（约 12 笔/年），统计上太薄。下一步是跨品种验证体制闸门，不是继续调阈值。",
+      "command": "alpharadar run --symbol P.DCE --strategy utbot --freq 5min --start 20220101 --set use_regime=1 --set er_min=0.25 --set atr_ratio_min=0",
+      "window": {
+        "start": "20220101",
+        "end": "20261009"
+      },
+      "scale": {
+        "ratio": 0.2216,
+        "source": "P.DCE 5min 实测：往返成本 4.5 点 ÷ 平均振幅 20.31 点（2026-10-10 cost_scales）"
+      },
+      "flags": []
+    },
+    {
+      "id": "orb-5min",
+      "strategy": "开盘区间突破 ORB（原创实现）",
+      "strategy_key": "orb_classic",
+      "family": "日内突破",
+      "family_key": "breakout",
+      "source": "原创实现",
+      "origin": "思路来源：Toby Crabel 的开盘区间突破（Opening Range Breakout，1990 年公开出版的交易思路）；按公开思路独立实现，未参照任何 TradingView 源码。",
+      "license": "MIT",
+      "symbol": "P.DCE",
+      "name": "棕榈油",
+      "asset_class": "futures",
+      "freq": "5min",
+      "editor_verdict": "reject",
+      "headline": "全场最高胜率 49.3%，依然是负期望",
+      "metrics": {
+        "trades": 1223,
+        "win": 0.493,
+        "pf": 0.889,
+        "avg_points": null,
+        "max_dd_pct": null,
+        "pnl_dd": null,
+        "positive_years": 0,
+        "years": 5,
+        "total_pnl": null,
+        "max_dd": null
+      },
+      "few": "1223 笔 / 胜率 49.3% / PF 0.889 / 0/5 年为正",
+      "yearly": [],
+      "mechanism": "赔率结构不成立：突破后回撤到对侧止损太常见，而赢的行程常在一倍区间高度之前就衰竭。**高胜率掩盖不了负期望** —— 这条是胜率和赚钱无关的最干净证据。",
+      "command": "alpharadar run --symbol P.DCE --strategy orb_classic --freq 5min --start 20220101",
+      "window": {
+        "start": "20220101",
+        "end": "20261009"
+      },
+      "scale": {
+        "ratio": 0.2216,
+        "source": "P.DCE 5min 实测：往返成本 4.5 点 ÷ 平均振幅 20.31 点（2026-10-10 cost_scales）"
+      },
+      "flags": [
+        "rerun_pending"
+      ],
+      "rerun_note": "下列数字来自旧的 TradingView 移植版（CC BY-NC-SA 4.0，已停止对外使用）。原创实现的思路相同但代码独立，需在生产环境重跑回测后替换这些数字并重新判定。"
+    },
+    {
+      "id": "false-breakout-1min",
+      "strategy": "假突破反向（原创实现）",
+      "strategy_key": "breakout_fade",
+      "family": "反转",
+      "family_key": "reversal",
+      "source": "原创实现",
+      "origin": "思路来源：Linda Raschke 与 Larry Connors《Street Smarts》（1995）公开的「Turtle Soup」假突破反向思路；按公开思路独立实现，未参照任何 TradingView 源码。",
+      "license": "MIT",
+      "symbol": "P.DCE",
+      "name": "棕榈油",
+      "asset_class": "futures",
+      "freq": "1min",
+      "editor_verdict": "reject",
+      "headline": "1931 笔、0/5 年为正：突破确实偏假，但假完是延续不是回头",
+      "metrics": {
+        "trades": 1931,
+        "win": null,
+        "pf": 0.692,
+        "avg_points": -4.31,
+        "max_dd_pct": null,
+        "pnl_dd": null,
+        "positive_years": 0,
+        "years": 5,
+        "total_pnl": null,
+        "max_dd": null
+      },
+      "few": "1min 1931 笔 / PF 0.692 / 每手 −4.31 点；5min 462 笔 / PF 0.849",
+      "yearly": [],
+      "mechanism": "信号在价格已经收回之后才触发，等于在反方向的「最大不利偏移」处入场。棕榈油的突破确实偏假，但假完之后沿原方向延续，不是回头。",
+      "command": "alpharadar run --symbol P.DCE --strategy breakout_fade --freq 1min --start 20220101",
+      "window": {
+        "start": "20220101",
+        "end": "20261009"
+      },
+      "scale": {
+        "ratio": 0.577,
+        "source": "P.DCE 1min 记录值：往返成本 4.5 点 ÷ 平均振幅 7.8 点（docs/findings.md §9）"
+      },
+      "flags": [
+        "rerun_pending"
+      ],
+      "rerun_note": "下列数字来自旧的 TradingView 移植版（CC BY-NC-SA 4.0，已停止对外使用）。原创实现的思路相同但代码独立，需在生产环境重跑回测后替换这些数字并重新判定。"
+    },
+    {
+      "id": "vreversal-1min",
+      "strategy": "冰点反转（原创）",
+      "strategy_key": "vreversal",
+      "family": "反转",
+      "family_key": "reversal",
+      "source": "原创（形态来自沪银 1 分钟图）",
+      "origin": "",
+      "license": "MIT",
+      "symbol": "P.DCE",
+      "name": "棕榈油",
+      "asset_class": "futures",
+      "freq": "1min",
+      "editor_verdict": "reject",
+      "headline": "形态边际比成本小一个数量级，1 分钟尺度没有边际",
+      "metrics": {
+        "trades": 1718,
+        "win": null,
+        "pf": 0.746,
+        "avg_points": -3.72,
+        "max_dd_pct": null,
+        "pnl_dd": null,
+        "positive_years": 0,
+        "years": 5,
+        "total_pnl": null,
+        "max_dd": null
+      },
+      "few": "1min 1718 笔 / PF 0.746 / 每手 −3.72 点",
+      "yearly": [],
+      "mechanism": "事件研究：冰点事件前向收益最大 +0.30 点（5 根），突破入场 −1.02 点，而往返成本 4.5 点 —— 形态的边际比成本小一个数量级。回踩再入能把盈亏比从 0.81 修到 1.29，但胜率跌破平衡线，PF 反而降。**盈亏比倒挂是症状，病根是这个形态在 1 分钟尺度没有边际。**",
+      "command": "alpharadar run --symbol P.DCE --strategy vreversal --freq 1min --start 20220101",
+      "window": {
+        "start": "20220101",
+        "end": "20261009"
+      },
+      "scale": {
+        "ratio": 0.577,
+        "source": "P.DCE 1min 记录值：往返成本 4.5 点 ÷ 平均振幅 7.8 点（docs/findings.md §9）"
+      },
+      "flags": []
+    },
+    {
+      "id": "atr-sweep",
+      "strategy": "ATR 止损倍数敏感性",
+      "strategy_key": "utbot",
+      "family": "参数稳健性检验",
+      "family_key": "research",
+      "source": "参数扫描（3 变体 × 3 周期 × 5 倍数 = 45 组）",
+      "origin": "",
+      "license": "—",
+      "symbol": "P.DCE",
+      "name": "棕榈油",
+      "asset_class": "futures",
+      "freq": "5min",
+      "editor_verdict": "finding",
+      "headline": "宽止损 > 紧止损，单调改善，没有例外",
+      "metrics": {
+        "trades": null,
+        "win": null,
+        "pf": null,
+        "avg_points": null,
+        "max_dd_pct": null,
+        "pnl_dd": null,
+        "positive_years": null,
+        "years": null,
+        "total_pnl": null,
+        "max_dd": null
+      },
+      "few": "45 组参数：倍数 1.0/1.5 一律惨败（PF 0.55~0.88），2.0 勉强，3.0 顶点",
+      "yearly": [],
+      "mechanism": "紧止损是成本绞肉机：止损越紧，被噪声打掉的次数越多，而每次被打掉都要付一遍往返成本。这条结论在参数邻域上是单调的，所以它才可信 —— 孤点最优才是过拟合的信号。",
+      "command": "alpharadar matrix --symbols P.DCE --strategies utbot --freqs 5min --set stop_atr=1.0,1.5,2.0,3.0",
+      "window": {
+        "start": "20220101",
+        "end": "20261009"
+      },
+      "scale": {
+        "ratio": 0.2216,
+        "source": "P.DCE 5min 实测：往返成本 4.5 点 ÷ 平均振幅 20.31 点（2026-10-10 cost_scales）"
+      },
+      "flags": []
+    },
+    {
+      "id": "partial-tp",
+      "strategy": "分批止盈",
+      "strategy_key": "utbot",
+      "family": "离场结构",
+      "family_key": "research",
+      "source": "参数对照",
+      "origin": "",
+      "license": "—",
+      "symbol": "P.DCE",
+      "name": "棕榈油",
+      "asset_class": "futures",
+      "freq": "5min",
+      "editor_verdict": "finding",
+      "headline": "负贡献：PF 0.905 → 0.852",
+      "metrics": {
+        "trades": null,
+        "win": null,
+        "pf": 0.852,
+        "avg_points": null,
+        "max_dd_pct": null,
+        "pnl_dd": null,
+        "positive_years": null,
+        "years": null,
+        "total_pnl": null,
+        "max_dd": null
+      },
+      "few": "TP1/TP2/TP3 各平 1/3（1/2/3 ×ATR）：PF 0.905 → 0.852",
+      "yearly": [],
+      "mechanism": "盈利单被提前砍掉，亏损单照吃满止损。分批只在「少数单子能走很远」的分布下才划算，本形态不具备。",
+      "command": "alpharadar run --symbol P.DCE --strategy utbot --freq 5min --set partial_tps=1,2,3",
+      "window": {
+        "start": "20220101",
+        "end": "20261009"
+      },
+      "scale": {
+        "ratio": 0.2216,
+        "source": "P.DCE 5min 实测：往返成本 4.5 点 ÷ 平均振幅 20.31 点（2026-10-10 cost_scales）"
+      },
+      "flags": []
+    },
+    {
+      "id": "breakeven-stop",
+      "strategy": "保本止损",
+      "strategy_key": "utbot",
+      "family": "离场结构",
+      "family_key": "research",
+      "source": "参数对照",
+      "origin": "",
+      "license": "—",
+      "symbol": "P.DCE",
+      "name": "棕榈油",
+      "asset_class": "futures",
+      "freq": "5min",
+      "editor_verdict": "finding",
+      "headline": "重灾：胜率 47.8% → 31.2%，PF 0.75 → 0.65",
+      "metrics": {
+        "trades": null,
+        "win": 0.312,
+        "pf": 0.65,
+        "avg_points": null,
+        "max_dd_pct": null,
+        "pnl_dd": null,
+        "positive_years": null,
+        "years": null,
+        "total_pnl": null,
+        "max_dd": null
+      },
+      "few": "浮盈 8 点推平：胜率 47.8% → 31.2%，PF 0.75 → 0.65",
+      "yearly": [],
+      "mechanism": "推平止损把还没走出来的单子提前判死。与工程内 5 分钟 BOLL 策略的历史记录完全一致（当时胜率掉到 1%）—— 同一个坑踩两次，所以它进了「已知无效」清单。",
+      "command": "alpharadar run --symbol P.DCE --strategy utbot --freq 5min --set breakeven_points=8",
+      "window": {
+        "start": "20220101",
+        "end": "20261009"
+      },
+      "scale": {
+        "ratio": 0.2216,
+        "source": "P.DCE 5min 实测：往返成本 4.5 点 ÷ 平均振幅 20.31 点（2026-10-10 cost_scales）"
+      },
+      "flags": []
+    }
+  ]
+}

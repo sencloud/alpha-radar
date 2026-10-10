@@ -89,6 +89,21 @@ alpharadar matrix --symbols P.DCE,Y.DCE,M.DCE \
 对外使用的是 `alpharadar/strategies/cleanroom.py` 里按公开交易思路独立实现的
 `orb_classic` / `breakout_fade`（未参照任何 TradingView 源码）。
 
+## 证伪档案：五道闸门自动判定 + 对外导出
+
+五道闸门（样本 → 尺度 → 分年 → 收益回撤比 → 稳健性）的阈值在
+[`config/gates.json`](config/gates.json)（带 `threshold_version`），判定逻辑在
+`alpharadar/judge.py`；精选档案在 [`docs/archive/curated.json`](docs/archive/curated.json)。
+
+```bash
+alpharadar falsify-export --out falsification.json          # 默认不含「样本不足」
+alpharadar falsify-export --out - --include-insufficient    # 输出到 stdout
+curl -s localhost:8901/api/falsification                    # 只读接口，免鉴权
+```
+
+非商用许可（CC BY-NC*、禁止再分发）的策略不会出现在导出里。
+对外 JSON 契约见 [docs/falsification-export.md](docs/falsification-export.md)。
+
 ## 两只手：确定性内核 + agent 大脑
 
 ### 全市场回测：任务队列 + 常驻 worker

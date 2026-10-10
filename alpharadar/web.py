@@ -9,6 +9,8 @@
     GET  /report/<名称> 查看已生成的 HTML 报告
     GET  /api/health    健康检查（供 Caddy / 监控用）
     GET  /api/strategies 策略清单 JSON
+    GET  /api/falsification  证伪档案（五道闸门判定结果，只读、免鉴权；
+                         契约见 docs/falsification-export.md）
     GET  /cover.png     推广封面
 
 安全与配额（公开站点必须考虑）：
@@ -47,6 +49,28 @@ _lock = threading.Lock()
 _jobs: dict[str, dict] = {}
 _last_run = 0.0
 NAME_RE = re.compile(r"^[A-Za-z0-9._\-]+$")
+
+FALSIFY_TTL = float(os.environ.get("ALPHARADAR_FALSIFY_TTL", "300"))
+FALSIFY_LIMIT = int(os.environ.get("ALPHARADAR_FALSIFY_LIMIT", "2000"))
+_fx_cache: dict[tuple, tuple[float, bytes]] = {}
+_fx_lock = threading.Lock()
+
+
+def falsification_json(include_insufficient: bool = False,
+                       limit: int | None = None) -> bytes:
+    """/api/falsification 的响应体，按参数缓存 FALSIFY_TTL 秒（全表判定较重）。"""
+    key = (include_insufficient, limit)
+    now = time.time()
+    with _fx_lock:
+        hit = _fx_cache.get(key)
+        if hit and now - hit[0] < FALSIFY_TTL:
+            return hit[1]
+    from .falsify import build_export
+    payload = build_export(include_insufficient=include_insufficient, limit=limit)
+    body = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    with _fx_lock:
+        _fx_cache[key] = (now, body)
+    return body
 
 
 # ==================== 页面 ====================
@@ -160,7 +184,8 @@ def _index() -> bytes:
 <p class="note">源码：<a href="https://github.com/sencloud/alpha-radar">
 github.com/sencloud/alpha-radar</a>
 &nbsp;·&nbsp; <a href="/api/health">/api/health</a>
-&nbsp;·&nbsp; <a href="/api/strategies">/api/strategies</a></p>
+&nbsp;·&nbsp; <a href="/api/strategies">/api/strategies</a>
+&nbsp;·&nbsp; <a href="/api/falsification">/api/falsification</a></p>
 """
     return _page("alpha-radar · 策略雷达", body)
 
@@ -639,6 +664,19 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/strategies":
             return self._json([{"key": s.key, "name": s.name, "source": s.source,
                                 "license": s.license} for s in catalog()])
+        if p == "/api/falsification":
+            q = parse_qs(u.query)
+            inc = {x.strip() for v in q.get("include", []) for x in v.split(",")}
+            try:
+                lim = int((q.get("limit") or [FALSIFY_LIMIT])[0])
+            except ValueError:
+                return self._json({"error": "limit 必须是整数"}, 400)
+            lim = max(0, min(lim, 20000))
+            try:
+                body = falsification_json("insufficient" in inc, lim)
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"[:300]}, 500)
+            return self._send(200, body, "application/json; charset=utf-8")
         if p == "/runs":
             try:
                 return self._send(200, _runs_page(parse_qs(u.query)))
