@@ -1,0 +1,45 @@
+# alpha-radar 证伪档案预生成（systemd oneshot，由 alpharadar-falsify.timer 每小时触发）
+#
+# 跑 `alpharadar falsify-pregen`：判定结果库 → 原子写
+#   /opt/alpha-radar/data/falsification.json              （GET /api/falsification）
+#   /opt/alpha-radar/data/falsification.insufficient.json （?include=insufficient）
+# web 只读这两个文件，绝不在请求里判定（曾经现场判定把 web 拖到 1.1 GB）。
+#
+# 安装：deploy.py 的 systemd 步骤会一并安装、启用 timer，并在部署后后台跑一次。
+# 手动跑：sudo systemctl start --no-block alpharadar-falsify
+# 看日志：journalctl -u alpharadar-falsify -n 20 --no-pager
+
+[Unit]
+Description=alpha-radar falsification archive pre-generation
+Documentation=https://alpha-radar.infiniti.website/api/falsification
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=alpharadar
+Group=alpharadar
+WorkingDirectory=/opt/alpha-radar
+EnvironmentFile=/opt/alpha-radar/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/alpha-radar/.venv/bin/python -m alpharadar.cli falsify-pregen
+# 正常几分钟内跑完；超过 20 分钟一定是出了问题，直接杀掉（旧文件保留不动）
+TimeoutStartSec=1200
+
+# 后台批处理：最低优先级，硬性内存上限，绝不拖累 web / 同机的 lastdays、infiniti
+Nice=15
+CPUWeight=10
+CPUQuota=60%
+IOWeight=10
+MemoryHigh=600M
+MemoryMax=800M
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/alpha-radar/data
+ReadOnlyPaths=/opt/alpha-radar/data_cache /opt/alpha-radar/reports
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=alpharadar-falsify

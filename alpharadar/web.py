@@ -10,7 +10,9 @@
     GET  /api/health    健康检查（供 Caddy / 监控用）
     GET  /api/strategies 策略清单 JSON
     GET  /api/falsification  证伪档案（五道闸门判定结果，只读、免鉴权；
-                         契约见 docs/falsification-export.md）
+                         契约见 docs/falsification-export.md）。只读
+                         alpharadar-falsify.timer 预生成的文件，绝不在请求里判定；
+                         文件还没生成时 503 {"error": "not_ready"}
     GET  /cover.png     推广封面
     POST /runs/trigger   手动扫描一轮（需管理口令）
     POST /scripts/harvest 手动采集一次（需管理口令）
@@ -37,6 +39,7 @@ import threading
 import time
 import traceback
 import uuid
+from email.utils import formatdate
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -60,10 +63,12 @@ NAME_RE = re.compile(r"^[A-Za-z0-9._\-]+$")
 log = logging.getLogger("alpharadar.web")
 ADMIN_ENV = "ALPHARADAR_ADMIN_TOKEN"
 MAX_FORM_BYTES = 64 * 1024
-FALSIFY_TTL = float(os.environ.get("ALPHARADAR_FALSIFY_TTL", "300"))
-FALSIFY_LIMIT = int(os.environ.get("ALPHARADAR_FALSIFY_LIMIT", "2000"))
-_fx_cache: dict[tuple, tuple[float, bytes]] = {}
+# 预生成文件所在目录（默认 data/；测试里 monkeypatch 这个变量）
+FALSIFY_DIR: Path = config.DATA_DIR
+FALSIFY_FILES = {False: "falsification.json", True: "falsification.insufficient.json"}
+_fx_cache: dict[tuple, tuple[tuple, bytes]] = {}
 _fx_lock = threading.Lock()
+_FX_CACHE_MAX = 16
 
 
 def admin_token() -> str:
@@ -95,20 +100,45 @@ def check_admin(headers, form: dict) -> tuple[bool, str]:
 
 
 def falsification_json(include_insufficient: bool = False,
-                       limit: int | None = None) -> bytes:
-    """/api/falsification 的响应体，按参数缓存 FALSIFY_TTL 秒（全表判定较重）。"""
-    key = (include_insufficient, limit)
-    now = time.time()
+                       limit: int | None = None) -> tuple[bytes, os.stat_result] | None:
+    """/api/falsification 的响应体：只读预生成文件，绝不现场判定。
+
+    全表判定（11 万+ 条）要几分钟、上百 MB 内存，曾把线上 web 进程拖到 1.1 GB；
+    现在由 alpharadar-falsify.timer 定时跑 `alpharadar falsify-pregen` 原子写文件。
+    文件不存在返回 None（上层回 503）。按文件 mtime 缓存，文件一换自动失效。
+    limit 只在比文件里的自动条目少时才解析 JSON 截断（文件本身已按
+    ALPHARADAR_FALSIFY_LIMIT 截过，体积有界）。
+    """
+    path = Path(FALSIFY_DIR) / FALSIFY_FILES[bool(include_insufficient)]
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    sig = (str(path), st.st_mtime_ns, st.st_size)
+    key = (bool(include_insufficient), limit)
     with _fx_lock:
         hit = _fx_cache.get(key)
-        if hit and now - hit[0] < FALSIFY_TTL:
-            return hit[1]
-    from .falsify import build_export
-    payload = build_export(include_insufficient=include_insufficient, limit=limit)
-    body = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        if hit and hit[0] == sig:
+            return hit[1], st
+    try:
+        body = path.read_bytes()
+    except OSError:
+        return None
+    if limit is not None:
+        data = json.loads(body)
+        auto = [e for e in data.get("archive", []) if not e.get("curated")]
+        if len(auto) > limit:
+            cur = [e for e in data["archive"] if e.get("curated")]
+            sm = data.setdefault("summary", {})
+            sm["truncated"] = int(sm.get("truncated") or 0) + len(auto) - limit
+            data["archive"] = cur + auto[:limit]
+            sm["auto"], sm["archive_total"] = limit, len(data["archive"])
+            body = json.dumps(data, ensure_ascii=False, allow_nan=False).encode("utf-8")
     with _fx_lock:
-        _fx_cache[key] = (now, body)
-    return body
+        if len(_fx_cache) >= _FX_CACHE_MAX:
+            _fx_cache.clear()
+        _fx_cache[key] = (sig, body)
+    return body, st
 
 
 # ==================== 页面 ====================
@@ -676,8 +706,11 @@ class Handler(BaseHTTPRequestHandler):
         threading.Thread(target=worker, daemon=True).start()
         self._redirect(f"/job/{jid}")
 
-    def _send(self, code: int, body: bytes, ctype="text/html; charset=utf-8") -> None:
+    def _send(self, code: int, body: bytes, ctype="text/html; charset=utf-8",
+              headers: dict | None = None) -> None:
         self.send_response(code)
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -709,16 +742,33 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/falsification":
             q = parse_qs(u.query)
             inc = {x.strip() for v in q.get("include", []) for x in v.split(",")}
+            lim = None
+            if q.get("limit"):
+                try:
+                    lim = max(0, int(q["limit"][0]))
+                except ValueError:
+                    return self._json({"error": "limit 必须是整数"}, 400)
             try:
-                lim = int((q.get("limit") or [FALSIFY_LIMIT])[0])
-            except ValueError:
-                return self._json({"error": "limit 必须是整数"}, 400)
-            lim = max(0, min(lim, 20000))
-            try:
-                body = falsification_json("insufficient" in inc, lim)
+                got = falsification_json("insufficient" in inc, lim)
             except Exception as exc:
                 return self._json({"error": f"{type(exc).__name__}: {exc}"[:300]}, 500)
-            return self._send(200, body, "application/json; charset=utf-8")
+            if got is None:
+                body = json.dumps({"error": "not_ready",
+                                   "detail": "证伪档案尚未生成，稍后再试"},
+                                  ensure_ascii=False).encode("utf-8")
+                return self._send(503, body, "application/json; charset=utf-8",
+                                  {"Retry-After": "60", "Cache-Control": "no-store"})
+            body, st = got
+            etag = f'"{st.st_mtime_ns:x}-{st.st_size:x}-{lim if lim is not None else "a"}"'
+            hdr = {"ETag": etag, "Last-Modified": formatdate(st.st_mtime, usegmt=True),
+                   "Cache-Control": "public, max-age=60"}
+            if etag in (self.headers.get("If-None-Match") or ""):
+                self.send_response(304)
+                for k, v in hdr.items():
+                    self.send_header(k, v)
+                self.end_headers()
+                return None
+            return self._send(200, body, "application/json; charset=utf-8", hdr)
         if p == "/runs":
             try:
                 return self._send(200, _runs_page(parse_qs(u.query)))

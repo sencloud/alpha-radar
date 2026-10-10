@@ -473,21 +473,156 @@ def test_admin_post_requires_correct_token(server, monkeypatch, path):
     assert len(calls) == 3
 
 
-def test_api_falsification_endpoint(server, monkeypatch, fx_db, tmp_path):
+def _get(url, headers=None):
+    req = urllib.request.Request(url, headers=headers or {})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, dict(r.headers), r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, dict(e.headers), e.read()
+
+
+def _no_judging(monkeypatch):
+    """请求路径上一旦调用判定 / 导出就直接炸。"""
+    def boom(*a, **k):
+        raise AssertionError("/api/falsification 不允许现场判定")
+    for name in ("build_export", "build_views", "write_views", "judge_row",
+                 "iter_latest_ok_results"):
+        monkeypatch.setattr(falsify, name, boom)
+    monkeypatch.setattr(judge, "judge", boom)
+
+
+def test_api_falsification_503_when_not_generated(server, monkeypatch, tmp_path):
     from alpharadar import web
     base, _ = server
-    real = falsify.build_export
-    monkeypatch.setattr(falsify, "build_export",
-                        lambda **kw: real(db_path=fx_db, report_dir=tmp_path, cache_dir=None,
-                                          header_lookup=lambda s: "", **kw))
+    _no_judging(monkeypatch)
+    monkeypatch.setattr(web, "FALSIFY_DIR", tmp_path / "empty")
     web._fx_cache.clear()
-    with urllib.request.urlopen(base + "/api/falsification", timeout=10) as r:
-        data = json.loads(r.read())
+    code, hdr, body = _get(base + "/api/falsification")
+    assert code == 503 and json.loads(body)["error"] == "not_ready"
+    assert hdr.get("Retry-After")
+    code, _, body = _get(base + "/api/falsification?include=insufficient")
+    assert code == 503 and json.loads(body)["error"] == "not_ready"
+
+
+def test_api_falsification_serves_pregenerated_files(server, monkeypatch, fx_db, tmp_path):
+    from alpharadar import web
+    base, _ = server
+    out = tmp_path / "views"
+    falsify.write_views(out, limit=2000, db_path=fx_db, report_dir=tmp_path,
+                        cache_dir=None, header_lookup=lambda s: "")
+    _no_judging(monkeypatch)                       # 文件生成之后，请求路径不许再判定
+    monkeypatch.setattr(web, "FALSIFY_DIR", out)
+    web._fx_cache.clear()
+
+    code, hdr, body = _get(base + "/api/falsification")
+    assert code == 200 and body == (out / "falsification.json").read_bytes()
+    data = json.loads(body)
     assert data["summary"]["include_insufficient"] is False
     assert all(e["verdict"] != "insufficient" for e in data["archive"] if not e["curated"])
-    with urllib.request.urlopen(base + "/api/falsification?include=insufficient",
-                                timeout=10) as r:
-        data2 = json.loads(r.read())
+    assert hdr.get("ETag") and hdr.get("Last-Modified")
+
+    code, _, body2 = _get(base + "/api/falsification?include=insufficient")
+    data2 = json.loads(body2)
+    assert code == 200 and data2["summary"]["include_insufficient"] is True
     assert any(e["verdict"] == "insufficient" for e in data2["archive"] if not e["curated"])
-    assert "report" not in json.dumps(data2)
+    assert '"report"' not in body2.decode("utf-8")
+
+    code, _, body3 = _get(base + "/api/falsification?limit=1")
+    d3 = json.loads(body3)
+    assert code == 200 and d3["summary"]["auto"] == 1 and d3["summary"]["curated"] == 8
+    assert d3["summary"]["truncated"] == 2
+    assert _get(base + "/api/falsification?limit=x")[0] == 400
+
+    code, _, _ = _get(base + "/api/falsification", {"If-None-Match": hdr["ETag"]})
+    assert code == 304
     web._fx_cache.clear()
+
+
+def test_write_views_is_atomic(fx_db, tmp_path, monkeypatch):
+    out = tmp_path / "views"
+    kw = dict(db_path=fx_db, report_dir=tmp_path, cache_dir=None, header_lookup=lambda s: "")
+    main, full = falsify.write_views(out, limit=2000, **kw)
+    f = out / "falsification.json"
+    assert json.loads(f.read_text(encoding="utf-8")) == json.loads(json.dumps(main))
+    assert json.loads((out / "falsification.insufficient.json").read_text(
+        encoding="utf-8"))["summary"]["include_insufficient"] is True
+    before = f.read_bytes()
+    assert sorted(x.name for x in out.iterdir()) == ["falsification.insufficient.json",
+                                                    "falsification.json"]
+
+    def half_write(obj, fh, **k):
+        fh.write('{"schema_version": 1, "arch')             # 写了一半就崩
+        raise RuntimeError("disk full")
+    monkeypatch.setattr(falsify.json, "dump", half_write)
+    with pytest.raises(RuntimeError):
+        falsify.write_views(out, limit=2000, **kw)
+    assert f.read_bytes() == before                         # 旧文件原封不动
+    assert sorted(x.name for x in out.iterdir()) == ["falsification.insufficient.json",
+                                                    "falsification.json"]  # 不留临时文件
+
+
+def test_views_match_single_export(fx_db, tmp_path):
+    kw = dict(db_path=fx_db, report_dir=tmp_path, cache_dir=None, header_lookup=lambda s: "")
+    main, full = falsify.build_views(limit=2000, **kw)
+    a = _export(fx_db, tmp_path, limit=2000)
+    b = _export(fx_db, tmp_path, include_insufficient=True, limit=2000)
+    ids = lambda d: [e["id"] for e in d["archive"]]            # noqa: E731
+    assert ids(main) == ids(a) and ids(full) == ids(b)
+    assert main["summary"]["insufficient_hidden"] == 1
+    assert main["summary"]["auto_judged"] == 4                 # 截断前全量
+    assert main["summary"]["auto_by_verdict"]["insufficient"] == 1
+    m2, f2 = falsify.build_views(limit=1, **kw)
+    assert m2["summary"]["auto"] == 1 and m2["summary"]["truncated"] == 2
+    assert f2["summary"]["auto"] == 1 and f2["summary"]["truncated"] == 3
+
+
+def test_insufficient_rows_skip_heavy_fallbacks(tmp_path, monkeypatch):
+    """样本不足的旧结果不回读行情缓存 / 逐笔 CSV；尺度重算按 (品种,周期,起点) 记忆化。"""
+    db = tmp_path / "r.db"
+    store.init(db)
+    store.add_result(_row("chandelier", trades=50, cost_rt=None, avg_amp=None,
+                          yearly=None), db)
+    calls = []
+
+    def fake_scale(cache, sym, freq, start, slip):
+        calls.append((sym, freq, start))
+        return {"ratio": 0.1, "cost": 1.0, "amplitude": 10.0, "source": "cache"}
+
+    def no_csv(path):
+        raise AssertionError("样本不足的条目不该读逐笔 CSV")
+    monkeypatch.setattr(judge, "scale_from_cache", fake_scale)
+    monkeypatch.setattr(judge, "yearly_from_trades_csv", no_csv)
+    (tmp_path / "P.DCE_chandelier_5min_worker.trades.csv").write_text("日期,净利\n",
+                                                                       encoding="utf-8")
+    out = falsify.build_export(db_path=db, report_dir=tmp_path, cache_dir=tmp_path,
+                               header_lookup=lambda s: "", include_insufficient=True)
+    e = next(x for x in out["archive"] if not x["curated"])
+    assert e["verdict"] == "insufficient" and calls == []
+
+    store.add_result(_row("utbot", cost_rt=None, avg_amp=None), db)
+    store.add_result(_row("supertrend", cost_rt=None, avg_amp=None), db)
+    monkeypatch.setattr(judge, "yearly_from_trades_csv", lambda p: None)
+    out = falsify.build_export(db_path=db, report_dir=tmp_path, cache_dir=tmp_path,
+                               header_lookup=lambda s: "")
+    assert calls == [("P.DCE", "5min", "20220101")]          # 两条只算一次
+    by = {x["strategy_key"]: x for x in out["archive"] if not x["curated"]}
+    assert by["utbot"]["gates"]["scale"]["value"] == 0.1
+
+
+def test_yearly_from_trades_csv_matches_pandas(tmp_path):
+    tr = pd.DataFrame({"日期": ["2022-03-01", "2022-05-01", "2023-03-01", "2025-01-02"],
+                       "净利": [-5.5, 2.0, 1.0, 3.4]})
+    f = tmp_path / "x.trades.csv"
+    tr.to_csv(f, index=False, encoding="utf-8-sig")
+    assert judge.yearly_from_trades_csv(f) == judge.yearly_from_trades(
+        pd.read_csv(f, encoding="utf-8-sig", dtype={"日期": str}))
+    assert judge.yearly_from_trades_csv(tmp_path / "missing.csv") is None
+
+
+def test_cli_falsify_pregen(tmp_path, fx_db):
+    from alpharadar.cli import main
+    out = tmp_path / "v"
+    assert main(["falsify-pregen", "--dir", str(out), "--db", str(fx_db)]) == 0
+    assert json.loads((out / "falsification.json").read_text(encoding="utf-8"))["archive"]
+    assert (out / "falsification.insufficient.json").is_file()

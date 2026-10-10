@@ -199,6 +199,22 @@ def step_systemd() -> None:
        f"systemctl daemon-reload && systemctl enable {SVC} >/dev/null 2>&1; "
        f"systemctl restart {SVC} && sleep 3 && systemctl is-active {SVC}")
     print(f"[systemd] {SVC}.service 已重启")
+    step_falsify()
+
+
+def step_falsify() -> None:
+    """证伪档案预生成：安装 oneshot + 每小时 timer，并在后台立刻跑一次。
+
+    web 的 /api/falsification 只读预生成文件；文件生成前接口回 503 not_ready。
+    `start --no-block` 不等它跑完，不阻塞后面的 verify。
+    """
+    sh(f"cp {APP}/deploy/{SVC}-falsify.service /etc/systemd/system/ && "
+       f"cp {APP}/deploy/{SVC}-falsify.timer /etc/systemd/system/ && "
+       f"systemctl daemon-reload && "
+       f"systemctl enable --now {SVC}-falsify.timer >/dev/null 2>&1; "
+       f"systemctl is-active {SVC}-falsify.timer; "
+       f"systemctl start --no-block {SVC}-falsify.service && echo '[falsify] 已在后台生成'")
+    print("[falsify] 预生成 timer 已启用（每小时），本次已在后台触发")
 
 
 def step_schedule() -> None:
@@ -268,8 +284,14 @@ def step_verify() -> bool:
     ok &= '"ok": true' in health.replace("'", '"')
 
     svc = sh(f"systemctl is-active {SVC} {SVC}-scheduler.timer {SVC}-worker "
-             f"{SVC}-autoport").split()
+             f"{SVC}-autoport {SVC}-falsify.timer").split()
     print(f"[verify] 服务状态: {svc}")
+    # 证伪档案是后台生成的：这里只报告状态，不作为验收失败条件
+    fx = sh(f"ls -l --time-style=+%F_%T {APP}/data/falsification*.json 2>/dev/null; "
+            f"systemctl is-active {SVC}-falsify.service; "
+            f"curl -s -m 5 -o /dev/null -w 'api=%{{http_code}} %{{time_total}}s' "
+            f"http://127.0.0.1:{PORT}/api/falsification", check=False)
+    print(f"[verify] 证伪档案（后台生成中则 503 / activating 属正常）:\n{fx.strip()}")
 
     for url, must in [(f"https://{DOMAIN}/api/health", True),
                       (f"https://{DOMAIN}/", True)] + [(c, False) for c in COHOSTS]:
@@ -335,6 +357,8 @@ def main() -> int:
             step_systemd()
         elif s == "schedule":
             step_schedule()
+        elif s == "falsify":
+            step_falsify()
         elif s == "worker":
             step_worker()
         elif s == "autoport":

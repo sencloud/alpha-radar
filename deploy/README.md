@@ -48,7 +48,8 @@ python deploy\deploy.py --steps upload,systemd,verify
 | user | 建系统用户 `alpharadar` 与目录属主 |
 | venv | 建虚拟环境并 `pip install -e .` |
 | env | 上传 `.env`（含 TUSHARE_TOKEN），权限 600 |
-| systemd | 安装并重启 `alpharadar.service` |
+| systemd | 安装并重启 `alpharadar.service`；同时安装 `alpharadar-falsify.{service,timer}`（证伪档案每小时预生成）并在后台立即跑一次 |
+| falsify | 只做上一行的证伪档案部分（`--steps falsify`）|
 | schedule | 安装 `alpharadar-scheduler.{service,timer}`（每 6 小时扫描） |
 | caddy | 安装 `conf.d/alpharadar.caddy`，校验后 reload |
 | firewall | 确认本机 80/443 放行（云安全组需另配） |
@@ -76,15 +77,28 @@ python deploy\deploy.py --steps pack,upload,env,systemd,worker,verify
 ```
 
 `GET /api/falsification` 是只读、免鉴权的证伪档案接口（给 aiquant 后端拉取），
-默认不含「样本不足」条目，`?include=insufficient` 才返回；结果在进程内缓存
-`ALPHARADAR_FALSIFY_TTL` 秒（默认 300），自动条目上限 `ALPHARADAR_FALSIFY_LIMIT`
-（默认 2000，可用 `?limit=` 覆盖，最大 20000）。契约见 `docs/falsification-export.md`。
-也可以离线导出：
+默认不含「样本不足」条目，`?include=insufficient` 才返回。**web 只读预生成文件，绝不在请求里判定**
+（以前现场全表判定把 web 进程拖到 1.1 GB、15 分钟不返回）：
+
+- `alpharadar-falsify.timer` 每小时（开机后 5 分钟先跑一次）触发 oneshot
+  `alpharadar-falsify.service` → `alpharadar falsify-pregen`，原子写
+  `data/falsification.json` 与 `data/falsification.insufficient.json`；
+- 低优先级 + 硬上限：`Nice=15`、`CPUQuota=60%`、`MemoryMax=800M`、`TimeoutStartSec=1200`，
+  超时或超内存会被 systemd 杀掉，旧文件原样保留；
+- 自动条目上限 `ALPHARADAR_FALSIFY_LIMIT`（默认 2000，生成时生效）；`?limit=` 只能往小截；
+- 文件还没生成（例如首次部署后几分钟内）接口返回 `503 {"error":"not_ready"}`。
+  `deploy.py` 的 systemd 步骤会在后台立即触发一次生成，verify 只报告状态、不等它。
 
 ```bash
-sudo -u alpharadar /opt/alpha-radar/.venv/bin/alpharadar falsify-export \
-     --out /opt/alpha-radar/data/falsification.json
+# 手动重新生成 / 看结果
+sudo systemctl start --no-block alpharadar-falsify
+journalctl -u alpharadar-falsify -n 20 --no-pager      # 末行有用时、峰值内存、条目数
+systemctl list-timers alpharadar-falsify.timer
+# 离线导出单个视图（不影响线上文件）
+sudo -u alpharadar /opt/alpha-radar/.venv/bin/alpharadar falsify-export --out /tmp/x.json
 ```
+
+契约见 `docs/falsification-export.md`。
 
 结果库在升级后第一次 `store.init()` 时会自动补四列（`avg_amp / avg_px / cost_rt /
 yearly`，判定层要用）。旧结果没有这几列：尺度闸门会尝试用本机行情缓存重算，

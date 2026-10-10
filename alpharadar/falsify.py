@@ -2,8 +2,18 @@
 
 入口：
     build_export(...)                         -> dict
+    build_views(...)                          -> (主视图, 含样本不足视图)，一次判定两份
+    write_views(dir)                          -> 原子写 falsification.json / .insufficient.json
     CLI   alpharadar falsify-export --out x.json [--include-insufficient]
+    CLI   alpharadar falsify-pregen [--dir data] [--limit N]   （systemd timer 定时跑）
     HTTP  GET /api/falsification[?include=insufficient][&limit=N]
+          —— 只读预生成文件，**永远不在请求里判定**（全表判定要几分钟，见 web.py）
+
+性能约束（线上 11 万+ 条最新结果，2 核 3.6 GB 的共享机器）：
+  - 结果按 id 分批流式读取，不一次性 fetchall；
+  - 样本闸门没过的条目结论已定（insufficient），不再回读行情缓存 / 逐笔 CSV；
+  - 行情缓存重算尺度按 (品种, 周期, 起点) 记忆化；逐笔 CSV 用 csv 流式读两列；
+  - 有 limit 时每个视图只保留排序靠前的 limit 条，内存与结果表大小无关。
 
 对外契约见 docs/falsification-export.md。硬约束：
   - 只用白名单字段拼条目，**永远不带 report 路径**（HTML 报告不对外）；
@@ -16,7 +26,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -24,6 +36,8 @@ from . import config, judge, licensing
 from .universe import PRESETS, is_fund
 
 CURATED_PATH = config.ROOT / "docs" / "archive" / "curated.json"
+VIEW_FILES = {False: "falsification.json", True: "falsification.insufficient.json"}
+DEFAULT_LIMIT = int(os.environ.get("ALPHARADAR_FALSIFY_LIMIT", "2000"))
 OVERRIDES_PATH = config.ROOT / "config" / "verdict_overrides.json"
 SCHEMA_VERSION = 1
 
@@ -162,16 +176,38 @@ def judge_curated(rec: dict, cfg: dict, now: str) -> dict:
 
 
 # ==================== 结果库自动条目 ====================
-def latest_ok_results(db_path: Path | None = None) -> list[dict]:
-    """每个 (品种, 策略, 周期) 最新的一条成功结果。"""
+# 判定只需要这些列（不要 SELECT *：error 等长文本列白占内存）
+_ROW_COLS = ("id", "ts", "symbol", "name", "market", "strategy", "freq", "start", "end",
+             "trades", "win_rate", "pf", "avg_points", "total_pnl", "max_dd", "ret_dd",
+             "pos_years", "years", "report", "avg_amp", "avg_px", "cost_rt", "yearly")
+
+
+def iter_latest_ok_results(db_path: Path | None = None, batch: int = 1000):
+    """流式产出每个 (品种, 策略, 周期) 最新的一条成功结果。
+
+    先只取 id 列表（11 万个整数，约 1 MB），再按 id 分批取行：每批一个短事务，
+    不长时间占着读事务（worker 在同时写库，长读事务会让 WAL 一直涨）。
+    """
     from . import store
     store.init(db_path)
-    sql = """
-      SELECT r.* FROM results r
-      JOIN (SELECT symbol, strategy, freq, MAX(id) mid FROM results
-            WHERE status='ok' GROUP BY symbol, strategy, freq) t ON r.id = t.mid"""
     with store.connect(db_path) as con:
-        return [dict(r) for r in con.execute(sql).fetchall()]
+        ids = [r[0] for r in con.execute(
+            "SELECT MAX(id) FROM results WHERE status='ok' "
+            "GROUP BY symbol, strategy, freq ORDER BY 1")]
+    cols = ", ".join(f'"{c}"' for c in _ROW_COLS)
+    for i in range(0, len(ids), batch):
+        chunk = ids[i:i + batch]
+        with store.connect(db_path) as con:
+            rows = con.execute(
+                f"SELECT {cols} FROM results WHERE id IN "
+                f"({','.join('?' * len(chunk))}) ORDER BY id", chunk).fetchall()
+        for r in rows:
+            yield dict(r)
+
+
+def latest_ok_results(db_path: Path | None = None) -> list[dict]:
+    """每个 (品种, 策略, 周期) 最新的一条成功结果（小库 / 测试用；大库用 iter_ 版本）。"""
+    return list(iter_latest_ok_results(db_path))
 
 
 def _port_families(db_path: Path | None = None) -> dict[str, str]:
@@ -198,17 +234,21 @@ def _yearly_for(row: dict, report_dir: Path | None) -> tuple[list | None, str | 
     if rep.endswith(".html") and report_dir is not None:
         f = Path(report_dir) / (rep[:-5] + ".trades.csv")
         if f.is_file():
-            try:
-                import pandas as pd
-                tr = pd.read_csv(f, encoding="utf-8-sig", dtype={"日期": str})
-                return judge.yearly_from_trades(tr), "trades_csv"
-            except Exception:
-                pass
+            y = judge.yearly_from_trades_csv(f)       # 流式两列，不建 DataFrame
+            if y is not None:
+                return y, "trades_csv"
     return None, None
 
 
+def _sample_passes(metrics: dict, cfg: dict) -> bool:
+    c = cfg["gates"]["sample"]
+    t, y = judge._num(metrics.get("trades")), judge._num(metrics.get("years"))
+    return t is not None and y is not None and t >= c["min_trades"] and y >= c["min_years"]
+
+
 def judge_row(row: dict, strat, lic: licensing.LicenseInfo, cfg: dict, now: str,
-              families: dict, report_dir: Path | None, cache_dir: Path | None) -> dict:
+              families: dict, report_dir: Path | None, cache_dir: Path | None,
+              scale_memo: dict | None = None) -> dict:
     sym, key, freq = row["symbol"], row["strategy"], row["freq"]
     metrics = {
         "trades": row.get("trades"), "win": row.get("win_rate"), "pf": row.get("pf"),
@@ -220,12 +260,23 @@ def judge_row(row: dict, strat, lic: licensing.LicenseInfo, cfg: dict, now: str,
     metrics = _clean(metrics)
     scale_note = None
     ratio = judge.scale_ratio(row.get("cost_rt"), row.get("avg_amp"))
-    if ratio is None and cache_dir is not None and (metrics.get("trades") or 0) > 0:
-        sc = judge.scale_from_cache(cache_dir, sym, freq, str(row.get("start") or ""),
-                                    cfg["gates"]["scale"].get("slippage_ticks", 1))
+    # 样本闸门没过 → 结论必是 insufficient，后面几道闸门只是展示：
+    # 不再为它回读行情缓存 / 逐笔 CSV（线上一半以上的条目属于这类）。
+    full = _sample_passes(metrics, cfg)
+    if ratio is None and not full:
+        scale_note = "样本不足，未重算尺度"
+    if ratio is None and full and cache_dir is not None:
+        mk = (sym, freq, str(row.get("start") or ""))
+        if scale_memo is not None and mk in scale_memo:
+            sc = scale_memo[mk]
+        else:
+            sc = judge.scale_from_cache(cache_dir, sym, freq, mk[2],
+                                        cfg["gates"]["scale"].get("slippage_ticks", 1))
+            if scale_memo is not None:
+                scale_memo[mk] = sc
         if sc:
             ratio, scale_note = sc["ratio"], "由本机行情缓存重算"
-    yearly, ysrc = _yearly_for(row, report_dir)
+    yearly, ysrc = _yearly_for(row, report_dir if full else None)
     window = {"start": str(row.get("start") or ""), "end": str(row.get("end") or "")}
     res = judge.judge(metrics, scale=ratio, yearly=yearly, window=window, cfg=cfg,
                       scale_note=scale_note, yearly_source=ysrc)
@@ -281,13 +332,79 @@ def _project(entry: dict) -> dict:
     return _clean(out)
 
 
-def build_export(*, db_path: Path | None = None, include_insufficient: bool = False,
-                 limit: int | None = None, curated_path: Path | None = None,
-                 gates_path: Path | None = None, overrides_path: Path | None = None,
-                 report_dir: Path | None = config.REPORT_DIR,
-                 cache_dir: Path | None = config.CACHE_DIR,
-                 license_policy: dict | None = None, registry: dict | None = None,
-                 header_lookup=None, now: datetime | None = None) -> dict:
+_SORT_KEY = (lambda e: (VERDICT_RANK.get(e["verdict"], 9), e["family_key"] or "",
+                        e["strategy_key"] or "", e["symbol"] or "", e["freq"] or ""))
+
+
+class _TopN:
+    """只保留排序最靠前的 n 条（n=None 不限）；超过 2n 时排序截断，内存 O(n)。"""
+
+    def __init__(self, n: int | None):
+        self.n, self.items, self.total = n, [], 0
+
+    def add(self, e: dict) -> None:
+        self.total += 1
+        self.items.append(e)
+        if self.n is not None and len(self.items) > 2 * self.n + 64:
+            self._trim()
+
+    def _trim(self) -> None:
+        self.items.sort(key=_SORT_KEY)
+        if self.n is not None:
+            del self.items[self.n:]
+
+    def result(self) -> list[dict]:
+        self._trim()
+        return self.items
+
+
+def _payload(cfg: dict, now_s: str, curated: list[dict], auto: list[dict],
+             stats: dict, include_insufficient: bool, all_counts: dict) -> dict:
+    archive = curated + auto
+    by_verdict = {v: 0 for v in VERDICT_RANK}
+    by_gate = {g: 0 for g in judge.REJECT_GATES}
+    for e in archive:
+        by_verdict[e["verdict"]] = by_verdict.get(e["verdict"], 0) + 1
+        if e["verdict"] == "reject" and e["failed_gate"] in by_gate:
+            by_gate[e["failed_gate"]] += 1
+    summary = {
+        "archive_total": len(archive),
+        "curated": len(curated),
+        "auto": len(auto),
+        "by_verdict": by_verdict,
+        "failed_gate": by_gate,
+        "tradable": by_verdict.get("tradable", 0),
+        "pending": by_verdict.get("pending", 0),
+        "rejected": by_verdict.get("reject", 0),
+        "scale_marginal": sum(1 for e in archive if "scale_marginal" in (e["flags"] or [])),
+        "rerun_pending": sum(1 for e in archive if "rerun_pending" in (e["flags"] or [])),
+        "include_insufficient": include_insufficient,
+        **stats,
+        # 截断前的全量自动条目结论分布（by_verdict 只数本次输出的条目）
+        "auto_judged": sum(all_counts.values()),
+        "auto_by_verdict": {v: all_counts.get(v, 0) for v in VERDICT_RANK},
+    }
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": now_s,
+        "threshold_version": cfg["threshold_version"],
+        "gates": _gate_list(cfg),
+        "summary": summary,
+        "archive": archive,
+    }
+
+
+def build_views(*, db_path: Path | None = None, limit: int | None = None,
+                curated_path: Path | None = None,
+                gates_path: Path | None = None, overrides_path: Path | None = None,
+                report_dir: Path | None = config.REPORT_DIR,
+                cache_dir: Path | None = config.CACHE_DIR,
+                license_policy: dict | None = None, registry: dict | None = None,
+                header_lookup=None, now: datetime | None = None) -> tuple[dict, dict]:
+    """一次遍历结果库，同时产出 (主视图, 含样本不足视图)。
+
+    limit 只限制自动条目（精选档案不受限），每个视图各自取排序最靠前的 limit 条。
+    """
     cfg = judge.load_gates(gates_path)
     now_s = (now or datetime.now()).isoformat(timespec="seconds")
     policy = license_policy if license_policy is not None else licensing.load_policy()
@@ -295,6 +412,8 @@ def build_export(*, db_path: Path | None = None, include_insufficient: bool = Fa
         from .strategies import REGISTRY as registry          # noqa: N811
     overrides = load_overrides(overrides_path)
     lic_cache: dict[str, licensing.LicenseInfo] = {}
+    if limit is not None and limit < 0:
+        limit = None
 
     def lic_of(key: str):
         if key not in lic_cache:
@@ -322,11 +441,13 @@ def build_export(*, db_path: Path | None = None, include_insufficient: bool = Fa
         if ov:
             ok = apply_override(e, ov)
             stats["override_applied" if ok else "override_ignored"] += 1
-        curated.append(e)
+        curated.append(_project(e))
 
-    auto: list[dict] = []
+    main, insuff = _TopN(limit), _TopN(limit)
+    counts: dict[str, int] = {}
     families = _port_families(db_path)
-    for row in latest_ok_results(db_path):
+    scale_memo: dict = {}
+    for row in iter_latest_ok_results(db_path):
         key = row["strategy"]
         strat = registry.get(key)
         if strat is None:
@@ -336,57 +457,71 @@ def build_export(*, db_path: Path | None = None, include_insufficient: bool = Fa
         if not li.commercial_ok:
             stats["excluded_license"] += 1
             continue
-        e = judge_row(row, strat, li, cfg, now_s, families, report_dir, cache_dir)
+        e = judge_row(row, strat, li, cfg, now_s, families, report_dir, cache_dir,
+                      scale_memo)
         ov = overrides.get(e["id"])
         if ov:
             ok = apply_override(e, ov)
             stats["override_applied" if ok else "override_ignored"] += 1
-        if e["verdict"] == "insufficient" and not include_insufficient:
-            stats["insufficient_hidden"] += 1
-            continue
-        auto.append(e)
+        e = _project(e)
+        counts[e["verdict"]] = counts.get(e["verdict"], 0) + 1
+        (insuff if e["verdict"] == "insufficient" else main).add(e)
 
-    auto.sort(key=lambda e: (VERDICT_RANK.get(e["verdict"], 9), e["family_key"],
-                             e["strategy_key"], e["symbol"], e["freq"]))
-    if limit is not None and limit >= 0 and len(auto) > limit:
-        stats["truncated"] = len(auto) - limit
-        auto = auto[:limit]
-    archive = [_project(e) for e in curated + auto]
+    main_auto = main.result()
+    ins_auto = insuff.result()
+    # insufficient 排序最靠后：含样本不足视图 = 主视图条目 + 用样本不足补满 limit
+    room = None if limit is None else max(0, limit - len(main_auto))
+    full_auto = main_auto + (ins_auto if room is None else ins_auto[:room])
 
-    by_verdict = {v: 0 for v in VERDICT_RANK}
-    by_gate = {g: 0 for g in judge.REJECT_GATES}
-    for e in archive:
-        by_verdict[e["verdict"]] = by_verdict.get(e["verdict"], 0) + 1
-        if e["verdict"] == "reject" and e["failed_gate"] in by_gate:
-            by_gate[e["failed_gate"]] += 1
-    summary = {
-        "archive_total": len(archive),
-        "curated": len(curated),
-        "auto": len(auto),
-        "by_verdict": by_verdict,
-        "failed_gate": by_gate,
-        "tradable": by_verdict.get("tradable", 0),
-        "pending": by_verdict.get("pending", 0),
-        "rejected": by_verdict.get("reject", 0),
-        "scale_marginal": sum(1 for e in archive if "scale_marginal" in (e["flags"] or [])),
-        "rerun_pending": sum(1 for e in archive if "rerun_pending" in (e["flags"] or [])),
-        "include_insufficient": include_insufficient,
-        **stats,
-    }
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "generated_at": now_s,
-        "threshold_version": cfg["threshold_version"],
-        "gates": _gate_list(cfg),
-        "summary": summary,
-        "archive": archive,
-    }
+    st_main = dict(stats, insufficient_hidden=insuff.total,
+                   truncated=main.total - len(main_auto))
+    st_full = dict(stats, insufficient_hidden=0,
+                   truncated=main.total + insuff.total - len(full_auto))
+    return (_payload(cfg, now_s, curated, main_auto, st_main, False, counts),
+            _payload(cfg, now_s, curated, full_auto, st_full, True, counts))
+
+
+def build_export(*, include_insufficient: bool = False, **kw) -> dict:
+    """单个视图（CLI --out / 测试用）。参数同 build_views。"""
+    main, full = build_views(**kw)
+    return full if include_insufficient else main
+
+
+def _atomic_write(out: Path, payload: dict, indent: int | None = 2) -> None:
+    """先写同目录临时文件、fsync，再 os.replace：读者永远看不到半截文件。"""
+    out = Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{out.name}.", suffix=".tmp", dir=str(out.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=indent, allow_nan=False)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, out)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def write_export(out: Path, **kw) -> dict:
     payload = build_export(**kw)
-    out = Path(out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False)
-                   + "\n", encoding="utf-8")
+    _atomic_write(Path(out), payload)
     return payload
+
+
+def view_path(include_insufficient: bool, out_dir: Path | None = None) -> Path:
+    return Path(out_dir or config.DATA_DIR) / VIEW_FILES[bool(include_insufficient)]
+
+
+def write_views(out_dir: Path | None = None, *, limit: int | None = DEFAULT_LIMIT,
+                **kw) -> tuple[dict, dict]:
+    """预生成 /api/falsification 的两个视图文件（紧凑 JSON，原子替换）。"""
+    main, full = build_views(limit=limit, **kw)
+    _atomic_write(view_path(False, out_dir), main, indent=None)
+    _atomic_write(view_path(True, out_dir), full, indent=None)
+    return main, full
